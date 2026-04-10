@@ -66,12 +66,13 @@ const HOST_IP = getBestIP();
 
 function defaultSettings() {
   return {
-    allowGuestToGuest:    false,
-    allowGuestToHost:     true,
-    allowGuestLeave:      true,
-    requireLeaveApproval: false,
-    allowLateJoin:        true,
-    maxGuests:            50,
+    allowGuestToGuest:      false,
+    allowGuestToHost:       true,
+    allowGuestLeave:        true,
+    requireLeaveApproval:   false,
+    allowLateJoin:          true,
+    broadcastToLateJoiners: false,
+    maxGuests:              50,
   };
 }
 
@@ -110,6 +111,7 @@ function makeRoom(roomId, hostId, hostName, hostDevice) {
   rooms[roomId] = {
     hostId,
     settings: defaultSettings(),
+    broadcastHistory: [],
     peers: new Map([[hostId, {
       id: hostId, name: hostName, device: hostDevice,
       isHost: true, busy: false, joinedAt: Date.now(), token,
@@ -140,6 +142,8 @@ io.on("connection", (socket) => {
   socket.data = {};
 
   socket.on("create-room", ({ roomId, name, device }, ack) => {
+    if (socket.data?.roomId) { ack({ error: "Already in a room" }); return; }
+    if (!roomId || !name)    { ack({ error: "Invalid room parameters" }); return; }
     if (rooms[roomId]) { ack({ error: "Room already exists" }); return; }
     const token = makeRoom(roomId, socket.id, name, device);
     socket.join(roomId);
@@ -149,6 +153,8 @@ io.on("connection", (socket) => {
   });
 
   socket.on("join-room", ({ roomId, name, device }, ack) => {
+    if (socket.data?.roomId) { ack({ error: "Already in a room" }); return; }
+    if (!roomId || !name)    { ack({ error: "Invalid join parameters" }); return; }
     const room = rooms[roomId];
     if (!room) { ack({ error: "Room not found" }); return; }
     if (!room.settings.allowLateJoin && room.peers.size > 1) {
@@ -175,6 +181,29 @@ io.on("connection", (socket) => {
     broadcastPeerList(roomId);
     io.to(room.hostId).emit("guest-joined", { id: socket.id, name, device });
     console.log(`${name} joined room ${roomId}`);
+
+    // ── Replay broadcast history to late joiner ────────────────────────────
+    // Delay so the client has time to process the join-room ack and set up
+    // state before receiving file-request events. These go through the
+    // normal auto-accept flow on the guest side.
+    if (room.settings.broadcastToLateJoiners && room.broadcastHistory?.length > 0) {
+      const joinerSocketId = socket.id;
+      setTimeout(() => {
+        const r = rooms[roomId];
+        if (!r || !r.peers.has(joinerSocketId)) return;
+        r.broadcastHistory.forEach(bc => {
+          io.to(joinerSocketId).emit("file-request", {
+            from: r.hostId,
+            fromName: bc.fromName,
+            fromDevice: bc.fromDevice,
+            fileInfo: bc.fileInfo,
+            transferId: `${bc.transferId}__${joinerSocketId}`,
+            isBroadcast: true,
+          });
+        });
+        console.log(`📡 Replayed ${r.broadcastHistory.length} broadcast(s) to late joiner ${name}`);
+      }, 2000);
+    }
   });
 
   socket.on("rejoin-room", ({ token }, ack) => {
@@ -255,10 +284,17 @@ io.on("connection", (socket) => {
     const room = rooms[socket.data?.roomId];
     if (!room || room.hostId !== socket.id) return;
     const sender = room.peers.get(socket.id);
+
+    // Store for late joiners (only broadcast metadata, not the file itself)
+    if (!room.broadcastHistory) room.broadcastHistory = [];
+    room.broadcastHistory.push({
+      transferId, fileInfo,
+      fromName: sender.name, fromDevice: sender.device,
+    });
+
     let count = 0;
     room.peers.forEach((peer, peerId) => {
       if (peerId === socket.id) return;
-      // ✅ FIX: don't block broadcast on busy — let client queue it
       io.to(peerId).emit("file-request", {
         from: socket.id, fromName: sender.name, fromDevice: sender.device,
         fileInfo, transferId: `${transferId}__${peerId}`, isBroadcast: true,

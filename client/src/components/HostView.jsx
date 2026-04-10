@@ -49,7 +49,7 @@ export default function HostView() {
   } = useStore();
   const {
     sendFileRequest, broadcastFile, kickPeer, endSession,
-    updateSettings, approveLeave, denyLeave, acceptRequest, rejectRequest,
+    updateSettings, approveLeave, denyLeave, acceptRequest, rejectRequest, cancelOutgoing,
   } = useSwiftDrop();
 
   const [selectedPeer,  setSelectedPeer]  = useState(null);
@@ -139,28 +139,6 @@ export default function HostView() {
           </div>
         </div>
 
-        {/* ✅ FIX: Leave request banners inside sidebar — no more layout overlap */}
-        {leaveRequests.length > 0 && (
-          <div className="leave-requests-sidebar">
-            {leaveRequests.map(req => (
-              <div key={req.peerId} className="leave-banner-sidebar">
-                <div className="leave-banner-msg">
-                  <strong>{req.name}</strong> wants to leave
-                </div>
-                <div className="leave-banner-actions">
-                  <button
-                    className="btn-accept-sm"
-                    onClick={() => { approveLeave(req.peerId); removeLeaveRequest(req.peerId); }}
-                  >Allow</button>
-                  <button
-                    className="btn-reject-sm"
-                    onClick={() => { denyLeave(req.peerId); removeLeaveRequest(req.peerId); }}
-                  >Deny</button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
 
         <div className="room-info">
           <div className="room-row">
@@ -207,6 +185,33 @@ export default function HostView() {
 
       {/* ── Main ─────────────────────────────────────────────────── */}
       <main className="main-content">
+
+        {/* Leave approval requests — floating at top-right of main area */}
+        {leaveRequests.length > 0 && (
+          <div className="leave-requests-main">
+            {leaveRequests.map(req => (
+              <div key={req.peerId} className="leave-card">
+                <div className="leave-card-icon">🚪</div>
+                <div className="leave-card-body">
+                  <div className="leave-card-msg">
+                    <strong>{req.name}</strong> wants to leave
+                  </div>
+                  <div className="leave-card-actions">
+                    <button
+                      className="leave-card-allow"
+                      onClick={() => { approveLeave(req.peerId); removeLeaveRequest(req.peerId); }}
+                    >Allow</button>
+                    <button
+                      className="leave-card-deny"
+                      onClick={() => { denyLeave(req.peerId); removeLeaveRequest(req.peerId); }}
+                    >Deny</button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
 
         {/* Incoming file requests (guests sending to host) */}
         {incomingRequests.length > 0 && (
@@ -260,6 +265,11 @@ export default function HostView() {
                   <Toggle checked={roomSettings.requireLeaveApproval}
                     onChange={e => patchSetting("requireLeaveApproval", e.target.checked)}
                     label="Require Leave Approval" hint="You must approve every leave request" />
+
+                  <div className="settings-section-label">Broadcast</div>
+                  <Toggle checked={roomSettings.broadcastToLateJoiners}
+                    onChange={e => patchSetting("broadcastToLateJoiners", e.target.checked)}
+                    label="Send to Late Joiners" hint="Late joiners automatically receive previously broadcast files" />
                 </div>
               )}
             </div>
@@ -310,7 +320,7 @@ export default function HostView() {
                 <TransferQueue
                   active={peerActiveSending} outgoing={peerOutgoing} completed={peerCompletedSent}
                   fmtSize={fmtSize} fileIcon={fileIcon}
-                  onCancel={(tid) => { _socket?.emit("file-cancelled", { to: selectedPeer.id, transferId: tid }); useStore.getState().removeOutgoing(tid); }}
+                  onCancel={(tid) => cancelOutgoing(tid, selectedPeer.id)}
                 />
               </div>
             )}

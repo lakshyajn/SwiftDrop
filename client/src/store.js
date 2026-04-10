@@ -12,12 +12,13 @@ export const useStore = create((set, get) => ({
   leaveStatus:     null, // "pending" | "denied"
 
   roomSettings: {
-    allowGuestToGuest:    false,
-    allowGuestToHost:     true,
-    allowGuestLeave:      true,
-    requireLeaveApproval: false,
-    allowLateJoin:        true,
-    maxGuests:            100,
+    allowGuestToGuest:      false,
+    allowGuestToHost:       true,
+    allowGuestLeave:        true,
+    requireLeaveApproval:   false,
+    allowLateJoin:          true,
+    broadcastToLateJoiners: false,
+    maxGuests:              100,
   },
 
   peers:       [],
@@ -95,7 +96,8 @@ export const useStore = create((set, get) => ({
     roomSettings: {
       allowGuestToGuest: false, allowGuestToHost: true,
       allowGuestLeave: true, requireLeaveApproval: false,
-      allowLateJoin: true, maxGuests: 100,
+      allowLateJoin: true, broadcastToLateJoiners: false,
+      maxGuests: 100,
     },
   }),
 }));

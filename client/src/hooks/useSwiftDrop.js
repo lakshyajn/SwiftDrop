@@ -70,30 +70,44 @@ const BP_MAX_MS         = 30000;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Adaptive Broadcast Concurrency
-// Scales with peer count instead of being locked at 4.
+// For a 100-student classroom: ramp up to 20 concurrent WebRTC channels.
+// Each channel is independent (separate PC + DataChannel), so bandwidth is
+// divided across active slots. 20 is a safe ceiling for a laptop host.
 // ═══════════════════════════════════════════════════════════════════════════════
-function getMaxBroadcastSlots(totalQueued) {
-  const total = totalQueued + _activeBroadcastCount;
-  if (total <= 5)  return Math.min(total, 4);
-  if (total <= 20) return 6;
-  if (total <= 40) return 8;
-  return 10;
+function getMaxBroadcastSlots() {
+  // Ramp up as active count grows — start with a burst then plateau
+  if (_activeBroadcastCount === 0)  return 8;
+  if (_activeBroadcastCount < 10)   return 16;
+  return 20;
 }
 
 let   _activeBroadcastCount = 0;
 const _broadcastSendQueue   = [];
+let   _bcQueueRunning       = false; // guard against re-entrant draining
 
 function isBroadcastTransfer(id) { return id?.startsWith("bc-"); }
 
-async function processBroadcastQueue() {
-  const maxSlots = getMaxBroadcastSlots(_broadcastSendQueue.length);
-  while (_broadcastSendQueue.length > 0 && _activeBroadcastCount < maxSlots) {
+function processBroadcastQueue() {
+  if (_bcQueueRunning) return;
+  _bcQueueRunning = true;
+  (function drain() {
+    const maxSlots = getMaxBroadcastSlots();
+    if (_broadcastSendQueue.length === 0 || _activeBroadcastCount >= maxSlots) {
+      _bcQueueRunning = false;
+      return;
+    }
     const { from, transferId, peerName } = _broadcastSendQueue.shift();
     _activeBroadcastCount++;
     useStore.getState().updateOutgoing(transferId, { status: "connecting" });
     _activeTransferPeer[from] = transferId;
-    await createOffer(transferId, from, peerName);
-  }
+    // createOffer is async but we don't await — each peer is independent.
+    // setTimeout(0) between each offer unwinds the call stack so the event
+    // loop can process ICE/signal messages between offer creations.
+    createOffer(transferId, from, peerName).catch(err =>
+      console.error(`Broadcast offer failed for ${transferId}:`, err)
+    );
+    setTimeout(drain, 0);
+  })();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -108,6 +122,12 @@ const _pendFiles         = {};
 const _sending           = {};
 const _queue             = {};
 let   _activeTransferPeer = {};
+
+// Persistent broadcast file registry — keyed by bcId (e.g. "bc-1234567890").
+// Unlike _pendFiles, entries here are NEVER deleted by cleanup() so late joiners
+// can always resolve the file regardless of when they accept.
+// Cleared only on reset() / endSession().
+const _broadcastFiles    = {};  // bcId → File
 
 // Streaming writers (FSAPI), stall timers, async write queues
 const _streamWriters = {};   // transferId → FileSystemWritableFileStream
@@ -316,8 +336,8 @@ function setupReceiveChannel(channel, transferId, fromPeerId) {
     const now = Date.now();
     if (now - buf.lastUpdate > UI_UPDATE_MS || buf.received >= buf.meta.size) {
       const elapsed   = (now - buf.startTime) / 1000 || 0.001;
-      const speedNum  = buf.received / 1024 / 1024 / elapsed;
-      const speed     = speedNum.toFixed(2);
+      const speedNum  = (buf.received * 8) / 1e6 / elapsed; // bytes → Mbps
+      const speed     = speedNum.toFixed(1);
       const progress  = Math.min((buf.received / buf.meta.size) * 100, 100);
       const remaining = buf.meta.size - buf.received;
       const bps       = buf.received / elapsed;
@@ -415,12 +435,25 @@ function sendOverChannel(transferId, file, toPeerId, toPeerName) {
   let bpTimeout = BP_INITIAL_MS;
 
   // Stall detection on sender side
+  // For broadcast transfers, a stalled peer is re-queued for retry so the
+  // professor doesn't have to manually resend. For 1-to-1 transfers, mark stalled.
   startStallTimer(
     transferId,
     () => offset,
     () => {
-      useStore.getState().updateOutgoing(transferId, { status: "stalled" });
       console.error(`🚨 Sender stalled on ${transferId}`);
+      if (isBroadcastTransfer(transferId)) {
+        console.warn(`♻️ Re-queuing stalled broadcast peer (${transferId})`);
+        cleanup(transferId);
+        _activeBroadcastCount = Math.max(0, _activeBroadcastCount - 1);
+        // Re-queue the peer so they get another attempt
+        _broadcastSendQueue.push({ from: toPeerId, transferId, peerName: toPeerName });
+        // Restore the file reference before retrying
+        _pendFiles[transferId] = file;
+        processBroadcastQueue();
+      } else {
+        useStore.getState().updateOutgoing(transferId, { status: "stalled" });
+      }
     },
   );
 
@@ -480,8 +513,8 @@ function sendOverChannel(transferId, file, toPeerId, toPeerName) {
         const now = Date.now();
         if (now - lastUpdate > UI_UPDATE_MS || offset >= file.size) {
           const elapsed   = (now - t0) / 1000 || 0.001;
-          const speedNum  = offset / 1024 / 1024 / elapsed;
-          const speed     = speedNum.toFixed(2);
+          const speedNum  = (offset * 8) / 1e6 / elapsed; // bytes → Mbps
+          const speed     = speedNum.toFixed(1);
           const progress  = Math.min((offset / file.size) * 100, 100);
           const remaining = file.size - offset;
           const bps       = offset / elapsed;
@@ -653,11 +686,23 @@ export function useSwiftDrop() {
     sock.on("kicked", () => { clearSession(); useStore.getState().reset(); window.location.href = "/"; });
     sock.on("session-ended", () => {
       clearSession(); useStore.getState().reset();
+      // Clear any lingering broadcast state
+      Object.keys(_broadcastFiles).forEach(k => delete _broadcastFiles[k]);
+      _broadcastSendQueue.length = 0;
+      _activeBroadcastCount = 0;
       window.alert("The host has ended this session.");
       window.location.href = "/";
     });
 
-    sock.on("file-request",    (req)                   => useStore.getState().addIncomingRequest(req));
+    sock.on("file-request", (req) => {
+      // Auto-accept broadcast files — all guests start receiving simultaneously
+      // for fairness (exam/assignment scenarios). No manual accept needed.
+      if (req.isBroadcast) {
+        sock.emit("file-accepted", { to: req.from, transferId: req.transferId });
+        return;
+      }
+      useStore.getState().addIncomingRequest(req);
+    });
     sock.on("transfer-denied", ({ transferId, reason }) => useStore.getState().updateOutgoing(transferId, { status: "denied", reason }));
 
     sock.on("file-accepted", async ({ from, transferId }) => {
@@ -666,23 +711,28 @@ export function useSwiftDrop() {
       const peer = useStore.getState().peers.find(p => p.id === from);
       const peerName = peer?.name || "Peer";
 
-      // ── Broadcast transfers — add outgoing entry + concurrency limit ──
+      // ── Broadcast transfers ──
+      // Route through _broadcastSendQueue so concurrency is managed uniformly
+      // for BOTH original recipients and late joiners. This also prevents the
+      // _activeBroadcastCount from going negative when late-joiner paths bypass
+      // processBroadcastQueue's increment.
       if (isBroadcastTransfer(transferId)) {
         const file = _pendFiles[transferId];
-        if (file && !useStore.getState().outgoingQueue.find(o => o.transferId === transferId)) {
+        if (!file) {
+          console.error(`❌ Broadcast file not found for late joiner (${transferId}) — broadcast registry may be empty`);
+          return;
+        }
+        if (!useStore.getState().outgoingQueue.find(o => o.transferId === transferId)) {
           useStore.getState().addOutgoing({
             transferId, to: from, toName: peerName,
             fileInfo: { name: file.name, size: file.size, type: file.type },
-            status: "accepted", isBroadcast: true,
+            status: "queued", isBroadcast: true,
           });
         }
-        const maxSlots = getMaxBroadcastSlots(_broadcastSendQueue.length);
-        if (_activeBroadcastCount >= maxSlots) {
-          _broadcastSendQueue.push({ from, transferId, peerName });
-          useStore.getState().updateOutgoing(transferId, { status: "queued" });
-          return;
-        }
-        _activeBroadcastCount++;
+        // Enqueue — processBroadcastQueue manages the slot and increments counter
+        _broadcastSendQueue.push({ from, transferId, peerName });
+        processBroadcastQueue();
+        return; // do NOT fall through to direct createOffer below
       }
 
       useStore.getState().updateOutgoing(transferId, { status: "accepted" });
@@ -748,7 +798,10 @@ export function useSwiftDrop() {
 
   const broadcastFile = useCallback((file) => {
     const transferId = `bc-${Date.now()}`;
+    // Store in both: _pendFiles for the immediate send path, and _broadcastFiles
+    // as a persistent registry so late joiners can always resolve the file.
     _pendFiles[`__broadcast__${transferId}`] = file;
+    _broadcastFiles[transferId] = file;
     _socket?.emit("broadcast-file", { transferId, fileInfo: { name: file.name, size: file.size, type: file.type } });
   }, []);
 
@@ -786,14 +839,32 @@ export function useSwiftDrop() {
   const requestLeave   = useCallback((ack)    => _socket?.emit("request-leave", {}, ack), []);
   const approveLeave   = useCallback((peerId) => _socket?.emit("approve-leave", { peerId }), []);
   const denyLeave      = useCallback((peerId) => _socket?.emit("deny-leave",    { peerId }), []);
-  const endSession     = useCallback(() => { _socket?.emit("end-session"); clearSession(); useStore.getState().reset(); useStore.setState({ sessionEndedMsg: "Session ended." }); }, []);
+  const endSession     = useCallback(() => {
+    _socket?.emit("end-session");
+    clearSession();
+    useStore.getState().reset();
+    useStore.setState({ sessionEndedMsg: "Session ended." });
+    // Clear persistent broadcast registry and queue so memory is freed
+    Object.keys(_broadcastFiles).forEach(k => delete _broadcastFiles[k]);
+    _broadcastSendQueue.length = 0;
+    _activeBroadcastCount = 0;
+  }, []);
   const updateSettings = useCallback((patch)  => _socket?.emit("update-room-settings", patch), []);
 
   return { initSocket, sendFileRequest, broadcastFile, acceptRequest, rejectRequest, cancelOutgoing, kickPeer, requestLeave, approveLeave, denyLeave, endSession, updateSettings };
 }
 
 export function resolveBroadcastFile(transferId) {
-  if (_pendFiles[transferId]) return;
+  if (_pendFiles[transferId]) return; // already resolved
   const m = transferId.match(/^(bc-\d+)__/);
-  if (m) { const k = `__broadcast__${m[1]}`; if (_pendFiles[k]) _pendFiles[transferId] = _pendFiles[k]; }
+  if (!m) return;
+  const bcId = m[1];
+  // Primary: persistent registry — always available even after original peers complete
+  if (_broadcastFiles[bcId]) {
+    _pendFiles[transferId] = _broadcastFiles[bcId];
+    return;
+  }
+  // Fallback: legacy __broadcast__ key (for transfers before this fix)
+  const legacyKey = `__broadcast__${bcId}`;
+  if (_pendFiles[legacyKey]) _pendFiles[transferId] = _pendFiles[legacyKey];
 }

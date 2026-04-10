@@ -16,7 +16,7 @@ export default function TransferQueue({ outgoing, active, completed, fmtSize, fi
               <div className="transfer-name">{t.fileInfo?.name}</div>
               <div className="transfer-meta">
                 {t.direction === "sending" ? "↑ Sending to " + t.peerName : "↓ Receiving from " + t.peerName}
-                {" · "}{Number(t.speed || 0).toFixed(1)} MB/s
+                {" · "}{Number(t.speed || 0).toFixed(1)} Mbps
                 {t.eta && t.eta !== "--:--" && <span className="transfer-eta"> · ETA {t.eta}</span>}
                 {t.phase && t.phase !== "transferring" && (
                   <span className={`transfer-phase ${t.phase}`}>
@@ -83,7 +83,7 @@ export default function TransferQueue({ outgoing, active, completed, fmtSize, fi
               <div className="transfer-name">{c.fileInfo?.name}</div>
               <div className="transfer-meta">
                 {c.direction === "sending" ? `↑ Sent to ${c.peerName}` : `↓ Received from ${c.peerName}`}
-                {" · "}{c.avgSpeed} MB/s · {c.duration?.toFixed(1)}s
+                {" · "}{c.avgSpeed} Mbps · {c.duration?.toFixed(1)}s
                 <span className="transfer-verified"> · ✅ Verified</span>
               </div>
             </div>
