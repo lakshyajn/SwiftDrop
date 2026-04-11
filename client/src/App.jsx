@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useStore }       from "./store";
-import { useSwiftDrop, setServerConfig } from "./hooks/useSwiftDrop";
+import { useSwiftDrop, setServerConfig, clearSession, isGuestSessionEnded, clearGuestSessionEnded } from "./hooks/useSwiftDrop";
 import SetupView  from "./components/SetupView";
 import HostView   from "./components/HostView";
 import GuestView  from "./components/GuestView";
@@ -15,6 +15,7 @@ export default function App() {
   const { initSocket } = useSwiftDrop();
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState(null);
+  const [guestEndedGate, setGuestEndedGate] = useState(isGuestSessionEnded());
 
   useEffect(() => {
     useStore.setState({ myDevice: detectDevice() });
@@ -56,6 +57,32 @@ export default function App() {
     <div className="loading-screen">
       <div className="loading-logo">⚡ SwiftDrop</div>
       <div className="loading-sub" style={{ color: "#ef4444", maxWidth: 320, textAlign: "center" }}>{error}</div>
+    </div>
+  );
+
+  if (guestEndedGate) return (
+    <div className="setup-page">
+      <div className="setup-card">
+        <div className="modal-header">
+          <span>Session Ended</span>
+        </div>
+        <div className="modal-body">
+          <p className="end-session-copy">The session has been ended by the host.</p>
+          <div className="end-session-actions">
+            <button
+              className="btn-end-confirm"
+              onClick={() => {
+                clearSession();
+                clearGuestSessionEnded();
+                useStore.getState().reset();
+                setGuestEndedGate(false);
+              }}
+            >
+              Leave Room
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 

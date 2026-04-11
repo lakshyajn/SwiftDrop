@@ -1,6 +1,6 @@
 import { useState, useRef } from "react";
 import { useStore } from "../store";
-import { useSwiftDrop, clearSession } from "../hooks/useSwiftDrop";
+import { useSwiftDrop, clearSession, clearGuestSessionEnded } from "../hooks/useSwiftDrop";
 import RequestCard from "./RequestCard";
 import TransferQueue from "./TransferQueue";
 
@@ -22,7 +22,7 @@ function fileIcon(name = "") {
 }
 
 export default function GuestView() {
-  const { peers, roomId, hostId, incomingRequests, activeTransfers, outgoingQueue, completedTransfers, roomSettings, leaveStatus } = useStore();
+  const { peers, roomId, hostId, incomingRequests, activeTransfers, outgoingQueue, completedTransfers, roomSettings, leaveStatus, sessionEndedMsg } = useStore();
   const { acceptRequest, rejectRequest, sendFileRequest, cancelOutgoing, requestLeave } = useSwiftDrop();
 
   const [selectedTarget, setSelectedTarget] = useState(null);
@@ -51,11 +51,20 @@ export default function GuestView() {
   };
 
   const handleLeave = () => {
+    if (sessionEndedMsg === "The session has been ended by the host.") {
+      clearSession();
+      clearGuestSessionEnded();
+      useStore.getState().reset();
+      window.location.href = "/";
+      return;
+    }
+
     setLeaveLoading(true);
     requestLeave((res) => {
       setLeaveLoading(false);
       if (res.ok) {
         clearSession();
+        clearGuestSessionEnded();
         useStore.getState().reset();
         window.location.href = "/";
       } else if (res.pending) {
@@ -212,6 +221,22 @@ export default function GuestView() {
 
 
       </div>
+
+      {sessionEndedMsg === "The session has been ended by the host." && (
+        <div className="modal-overlay">
+          <div className="modal end-session-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <span>Session Ended</span>
+            </div>
+            <div className="modal-body">
+              <p className="end-session-copy">The session has been ended by the host.</p>
+              <div className="end-session-actions">
+                <button className="btn-end-confirm" onClick={handleLeave}>Leave Room</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

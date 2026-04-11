@@ -9,6 +9,7 @@ const path       = require("path");
 const PORT     = process.env.PORT || 3001;
 const FRONTEND_PORT = 5173;
 const IS_LOCAL = !process.env.PORT;
+const MAX_USERNAME_LENGTH = 20;
 
 const SUBNET_PRIORITY = [
   "192.168.43.", "172.20.10.", "192.168.137.",
@@ -78,6 +79,12 @@ function defaultSettings() {
 
 const rooms         = {};
 const sessionTokens = {};
+let networkHostApproverId = null;
+let networkHostApproverToken = null;
+let networkHostApproverReleaseTimer = null;
+const approvedHostCreators = {};      // socketId -> expiresAt
+const pendingHostCreateRequests = {}; // requestId -> { requesterSocketId, name, ip, roomId, requestedAt }
+const pendingHostCreateTimers = {};   // requestId -> timeout
 
 // ─── Per-peer transfer queue tracking (server-side) ──────────────────────────
 // Tracks active transferId per peerId so we can queue without blocking.
@@ -103,6 +110,43 @@ function isPeerBusy(socketId) {
 
 function makeToken() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function getClientIp(socket) {
+  const forwarded = socket.handshake.headers["x-forwarded-for"];
+  const raw = (forwarded ? String(forwarded).split(",")[0] : socket.handshake.address) || "unknown";
+  return raw.replace(/^::ffff:/, "");
+}
+
+function makeRequestId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function clearPendingHostCreateRequest(requestId) {
+  if (pendingHostCreateTimers[requestId]) {
+    clearTimeout(pendingHostCreateTimers[requestId]);
+    delete pendingHostCreateTimers[requestId];
+  }
+  delete pendingHostCreateRequests[requestId];
+}
+
+function clearApproverReleaseTimer() {
+  if (networkHostApproverReleaseTimer) {
+    clearTimeout(networkHostApproverReleaseTimer);
+    networkHostApproverReleaseTimer = null;
+  }
+}
+
+function clearAllHostCreateApprovalState() {
+  networkHostApproverId = null;
+  networkHostApproverToken = null;
+  clearApproverReleaseTimer();
+  for (const requestId of Object.keys(pendingHostCreateRequests)) {
+    clearPendingHostCreateRequest(requestId);
+  }
+  for (const socketId of Object.keys(approvedHostCreators)) {
+    delete approvedHostCreators[socketId];
+  }
 }
 
 function makeRoom(roomId, hostId, hostName, hostDevice) {
@@ -142,19 +186,110 @@ io.on("connection", (socket) => {
   socket.data = {};
 
   socket.on("create-room", ({ roomId, name, device }, ack) => {
+    const trimmedName = String(name || "").trim();
     if (socket.data?.roomId) { ack({ error: "Already in a room" }); return; }
-    if (!roomId || !name)    { ack({ error: "Invalid room parameters" }); return; }
+    if (!roomId || !trimmedName) { ack({ error: "Invalid room parameters" }); return; }
+    if (trimmedName.length > MAX_USERNAME_LENGTH) {
+      ack({ error: `Name must be ${MAX_USERNAME_LENGTH} characters or fewer` });
+      return;
+    }
+
+    // Fresh server with no active rooms should never block the first host.
+    if (Object.keys(rooms).length === 0) {
+      clearAllHostCreateApprovalState();
+    }
+
+    if (networkHostApproverId) {
+      const approverSocket = io.sockets.sockets.get(networkHostApproverId);
+      if (!approverSocket) {
+        networkHostApproverId = null;
+      }
+    }
+
+    if (!networkHostApproverId && networkHostApproverToken) {
+      ack({ error: "Room-creation approver is offline. Wait for the original host to reconnect." });
+      return;
+    }
+
+    if (networkHostApproverId && networkHostApproverId !== socket.id) {
+      const approvalExpiry = approvedHostCreators[socket.id] || 0;
+      if (approvalExpiry < Date.now()) {
+        const requestId = makeRequestId();
+        const req = {
+          requestId,
+          requesterSocketId: socket.id,
+          name: trimmedName,
+          ip: getClientIp(socket),
+          roomId,
+          requestedAt: Date.now(),
+        };
+        pendingHostCreateRequests[requestId] = req;
+        io.to(networkHostApproverId).emit("host-create-request", {
+          requestId: req.requestId,
+          name: req.name,
+          ip: req.ip,
+          roomId: req.roomId,
+          requestedAt: req.requestedAt,
+        });
+        pendingHostCreateTimers[requestId] = setTimeout(() => {
+          const timedReq = pendingHostCreateRequests[requestId];
+          if (!timedReq) return;
+          io.to(timedReq.requesterSocketId).emit("host-create-denied", {
+            requestId,
+            message: "Host approval timed out. Please try again.",
+          });
+          clearPendingHostCreateRequest(requestId);
+        }, 45000);
+        ack({ pendingApproval: true });
+        return;
+      }
+      delete approvedHostCreators[socket.id];
+    }
+
     if (rooms[roomId]) { ack({ error: "Room already exists" }); return; }
-    const token = makeRoom(roomId, socket.id, name, device);
+    const token = makeRoom(roomId, socket.id, trimmedName, device);
+    if (!networkHostApproverId) {
+      clearApproverReleaseTimer();
+      networkHostApproverId = socket.id;
+      networkHostApproverToken = token;
+    }
     socket.join(roomId);
-    socket.data = { roomId, name, isHost: true, token };
-    console.log(`Room created: ${roomId} by ${name}`);
+    socket.data = { roomId, name: trimmedName, isHost: true, token };
+    console.log(`Room created: ${roomId} by ${trimmedName}`);
     ack({ ok: true, roomId, token, settings: rooms[roomId].settings });
   });
 
+  socket.on("approve-host-create", ({ requestId }) => {
+    if (socket.id !== networkHostApproverId) return;
+    const req = pendingHostCreateRequests[requestId];
+    if (!req) return;
+    approvedHostCreators[req.requesterSocketId] = Date.now() + 2 * 60 * 1000;
+    io.to(req.requesterSocketId).emit("host-create-approved", {
+      requestId,
+      message: "Approved. You can now create your room.",
+    });
+    clearPendingHostCreateRequest(requestId);
+  });
+
+  socket.on("deny-host-create", ({ requestId }) => {
+    if (socket.id !== networkHostApproverId) return;
+    const req = pendingHostCreateRequests[requestId];
+    if (!req) return;
+    io.to(req.requesterSocketId).emit("host-create-denied", {
+      requestId,
+      message: "Host denied your request to create a room.",
+    });
+    clearPendingHostCreateRequest(requestId);
+  });
+
   socket.on("join-room", ({ roomId, name, device }, ack) => {
+    const trimmedName = String(name || "").trim();
     if (socket.data?.roomId) { ack({ error: "Already in a room" }); return; }
-    if (!roomId || !name)    { ack({ error: "Invalid join parameters" }); return; }
+    if (!roomId || !trimmedName) { ack({ error: "Invalid join parameters" }); return; }
+    if (trimmedName.length > MAX_USERNAME_LENGTH) {
+      ack({ error: `Name must be ${MAX_USERNAME_LENGTH} characters or fewer` });
+      return;
+    }
     const room = rooms[roomId];
     if (!room) { ack({ error: "Room not found" }); return; }
     if (!room.settings.allowLateJoin && room.peers.size > 1) {
@@ -165,45 +300,61 @@ io.on("connection", (socket) => {
     }
 
     for (const [oldSocketId, peerData] of room.peers.entries()) {
-      if (peerData.name === name && peerData.device === device) {
+      if (peerData.name === trimmedName && peerData.device === device) {
         room.peers.delete(oldSocketId);
       }
     }
 
     const token = makeToken();
-    sessionTokens[token] = { roomId, name, device, isHost: false };
+    sessionTokens[token] = { roomId, name: trimmedName, device, isHost: false };
     room.peers.set(socket.id, {
-      id: socket.id, name, device, isHost: false, busy: false, joinedAt: Date.now(), token,
+      id: socket.id, name: trimmedName, device, isHost: false, busy: false, joinedAt: Date.now(), token,
     });
     socket.join(roomId);
-    socket.data = { roomId, name, isHost: false, token };
+    socket.data = { roomId, name: trimmedName, isHost: false, token };
     ack({ ok: true, hostId: room.hostId, peers: getRoomPeerList(roomId), token, settings: room.settings });
     broadcastPeerList(roomId);
-    io.to(room.hostId).emit("guest-joined", { id: socket.id, name, device });
-    console.log(`${name} joined room ${roomId}`);
+    io.to(room.hostId).emit("guest-joined", { id: socket.id, name: trimmedName, device });
+    console.log(`${trimmedName} joined room ${roomId}`);
 
-    // ── Replay broadcast history to late joiner ────────────────────────────
-    // Delay so the client has time to process the join-room ack and set up
-    // state before receiving file-request events. These go through the
-    // normal auto-accept flow on the guest side.
-    if (room.settings.broadcastToLateJoiners && room.broadcastHistory?.length > 0) {
-      const joinerSocketId = socket.id;
-      setTimeout(() => {
-        const r = rooms[roomId];
-        if (!r || !r.peers.has(joinerSocketId)) return;
-        r.broadcastHistory.forEach(bc => {
+    // ── Replay broadcasts to late joiner ──────────────────────────────────────
+    // Case 1: In-flight broadcasts → always send (file is live in host's memory).
+    // Case 2: Completed broadcasts → only send if broadcastToLateJoiners=true.
+    const joinerSocketId = socket.id;
+    setTimeout(() => {
+      const r = rooms[roomId];
+      if (!r || !r.peers.has(joinerSocketId)) return;
+
+      // In-flight — unconditional
+      Object.values(r.activeBroadcasts || {}).forEach(ab => {
+        io.to(joinerSocketId).emit("file-request", {
+          from: r.hostId, fromName: ab.fromName, fromDevice: ab.fromDevice,
+          fileInfo: ab.fileInfo,
+          transferId: `${ab.transferId}__${joinerSocketId}`,
+          isBroadcast: true,
+        });
+        ab.pendingPeers.add(joinerSocketId);
+      });
+      const activeCount = Object.keys(r.activeBroadcasts || {}).length;
+      if (activeCount > 0)
+        console.log(`📡 Sent ${activeCount} in-flight broadcast(s) to late joiner ${trimmedName}`);
+
+      // Completed history — only if setting enabled, skip already-active ones
+      if (r.settings.broadcastToLateJoiners && r.broadcastHistory?.length > 0) {
+        const activeIds = new Set(Object.keys(r.activeBroadcasts || {}));
+        const toReplay = r.broadcastHistory.filter(bc => !activeIds.has(bc.transferId));
+        toReplay.forEach(bc => {
           io.to(joinerSocketId).emit("file-request", {
-            from: r.hostId,
-            fromName: bc.fromName,
-            fromDevice: bc.fromDevice,
+            from: r.hostId, fromName: bc.fromName, fromDevice: bc.fromDevice,
             fileInfo: bc.fileInfo,
             transferId: `${bc.transferId}__${joinerSocketId}`,
             isBroadcast: true,
           });
         });
-        console.log(`📡 Replayed ${r.broadcastHistory.length} broadcast(s) to late joiner ${name}`);
-      }, 2000);
-    }
+        if (toReplay.length > 0)
+          console.log(`📡 Replayed ${toReplay.length} completed broadcast(s) to late joiner ${trimmedName}`);
+      }
+    }, 1500);
   });
 
   socket.on("rejoin-room", ({ token }, ack) => {
@@ -223,7 +374,14 @@ io.on("connection", (socket) => {
     sessionTokens[newToken] = { ...sess };
     delete sessionTokens[token];
 
-    if (sess.isHost) room.hostId = socket.id;
+    if (sess.isHost) {
+      room.hostId = socket.id;
+      if (networkHostApproverToken && networkHostApproverToken === token) {
+        clearApproverReleaseTimer();
+        networkHostApproverId = socket.id;
+        networkHostApproverToken = newToken;
+      }
+    }
 
     room.peers.set(socket.id, {
       id: socket.id, name: sess.name, device: sess.device,
@@ -236,6 +394,25 @@ io.on("connection", (socket) => {
       peers: getRoomPeerList(sess.roomId), token: newToken, settings: room.settings });
     broadcastPeerList(sess.roomId);
     console.log(`${sess.name} rejoined room ${sess.roomId}`);
+
+    // Send in-flight broadcasts to rejoining guest
+    if (!sess.isHost && Object.keys(room.activeBroadcasts || {}).length > 0) {
+      const rejoinerSocketId = socket.id;
+      setTimeout(() => {
+        const r = rooms[sess.roomId];
+        if (!r || !r.peers.has(rejoinerSocketId)) return;
+        Object.values(r.activeBroadcasts || {}).forEach(ab => {
+          io.to(rejoinerSocketId).emit("file-request", {
+            from: r.hostId, fromName: ab.fromName, fromDevice: ab.fromDevice,
+            fileInfo: ab.fileInfo,
+            transferId: `${ab.transferId}__${rejoinerSocketId}`,
+            isBroadcast: true,
+          });
+          ab.pendingPeers.add(rejoinerSocketId);
+        });
+        console.log(`📡 Sent ${Object.keys(r.activeBroadcasts || {}).length} in-flight broadcast(s) to rejoiner ${sess.name}`);
+      }, 1500);
+    }
   });
 
   socket.on("update-room-settings", (patch) => {
@@ -291,6 +468,16 @@ io.on("connection", (socket) => {
       transferId, fileInfo,
       fromName: sender.name, fromDevice: sender.device,
     });
+
+    // Track in-flight so guests joining DURING this broadcast get it immediately
+    if (!room.activeBroadcasts) room.activeBroadcasts = {};
+    const recipientSet = new Set();
+    room.peers.forEach((_, peerId) => { if (peerId !== socket.id) recipientSet.add(peerId); });
+    room.activeBroadcasts[transferId] = {
+      transferId, fileInfo,
+      fromName: sender.name, fromDevice: sender.device,
+      pendingPeers: recipientSet,
+    };
 
     let count = 0;
     room.peers.forEach((peer, peerId) => {
@@ -348,6 +535,17 @@ io.on("connection", (socket) => {
       io.to(peerId).emit("transfer-complete", { from: socket.id, transferId, role: "receiver" });
       broadcastPeerList(socket.data.roomId);
       console.log(`✅ Transfer complete (receiver confirmed): ${transferId}`);
+
+      // Decrement active broadcast tracking
+      const bcMatch = transferId.match(/^(bc-\d+)__/);
+      if (bcMatch && room.activeBroadcasts?.[bcMatch[1]]) {
+        const ab = room.activeBroadcasts[bcMatch[1]];
+        ab.pendingPeers.delete(socket.id);
+        if (ab.pendingPeers.size === 0) {
+          delete room.activeBroadcasts[bcMatch[1]];
+          console.log(`📡 Broadcast ${bcMatch[1]} fully delivered`);
+        }
+      }
     } else {
       // Sender side flush complete — just log, don't clear busy yet
       console.log(`📤 Sender flushed: ${transferId} (waiting for receiver ack)`);
@@ -399,6 +597,27 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     const { roomId } = socket.data || {};
+
+    if (socket.id === networkHostApproverId) {
+      networkHostApproverId = null;
+      clearApproverReleaseTimer();
+      networkHostApproverReleaseTimer = setTimeout(() => {
+        if (!networkHostApproverId) networkHostApproverToken = null;
+        networkHostApproverReleaseTimer = null;
+      }, 30000);
+      for (const [requestId, req] of Object.entries(pendingHostCreateRequests)) {
+        io.to(req.requesterSocketId).emit("host-create-denied", {
+          requestId,
+          message: "Approval host disconnected. Please try again.",
+        });
+        clearPendingHostCreateRequest(requestId);
+      }
+    }
+    delete approvedHostCreators[socket.id];
+    for (const [requestId, req] of Object.entries(pendingHostCreateRequests)) {
+      if (req.requesterSocketId === socket.id) clearPendingHostCreateRequest(requestId);
+    }
+
     if (!roomId || !rooms[roomId]) return;
     const room = rooms[roomId];
 

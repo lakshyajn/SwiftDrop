@@ -2,6 +2,8 @@ import { useState, useEffect } from "react";
 import { useStore } from "../store";
 import { saveSession } from "../hooks/useSwiftDrop";
 
+const MAX_USERNAME_LENGTH = 20;
+
 function generateRoomId() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
@@ -9,6 +11,7 @@ function generateRoomId() {
 export default function SetupView() {
   const { serverInfo, myDevice } = useStore();
   const pendingRoom = useStore(s => s.pendingRoom);
+  const hostCreateError = useStore(s => s.hostCreateError);
 
   const [name,    setName]    = useState("");
   const [roomId,  setRoomId]  = useState(pendingRoom || "");
@@ -20,42 +23,65 @@ export default function SetupView() {
     if (pendingRoom) { setTab("join"); setRoomId(pendingRoom); }
   }, [pendingRoom]);
 
+  useEffect(() => {
+    if (!hostCreateError) return;
+    setLoading(false);
+    setError(hostCreateError);
+  }, [hostCreateError]);
+
   const createRoom = () => {
-    if (!name.trim()) { setError("Enter your name"); return; }
+    const trimmedName = name.trim();
+    if (!trimmedName) { setError("Enter your name"); return; }
+    if (trimmedName.length > MAX_USERNAME_LENGTH) {
+      setError(`Name must be ${MAX_USERNAME_LENGTH} characters or fewer`);
+      return;
+    }
+    useStore.setState({ pendingHostCreate: null, hostCreateError: null });
     setLoading(true); setError("");
     const id   = generateRoomId();
     const sock = window._swiftSock;
     if (!sock) { setError("Not connected to server yet"); setLoading(false); return; }
 
-    sock.emit("create-room", { roomId: id, name: name.trim(), device: myDevice }, (res) => {
+    sock.emit("create-room", { roomId: id, name: trimmedName, device: myDevice }, (res) => {
+      if (res?.pendingApproval) {
+        useStore.setState({ pendingHostCreate: { roomId: id, name: trimmedName, device: myDevice }, hostCreateError: null });
+        setLoading(false);
+        setError("Waiting for host approval...");
+        return;
+      }
       if (res?.error) { setError(res.error); setLoading(false); return; }
       
       // Save the token so auto-rejoin works!
-      saveSession({ token: res.token, roomId: id, name: name.trim(), device: myDevice, isHost: true });
+      saveSession({ token: res.token, roomId: id, name: trimmedName, device: myDevice, isHost: true });
       
-      useStore.setState({ role: "host", roomId: id, myName: name.trim(), isHost: true });
+      useStore.setState({ role: "host", roomId: id, myName: trimmedName, isHost: true });
     });
   };
 
   const joinRoom = () => {
-    if (!name.trim())   { setError("Enter your name"); return; }
+    const trimmedName = name.trim();
+    if (!trimmedName)   { setError("Enter your name"); return; }
+    if (trimmedName.length > MAX_USERNAME_LENGTH) {
+      setError(`Name must be ${MAX_USERNAME_LENGTH} characters or fewer`);
+      return;
+    }
     if (!roomId.trim()) { setError("Enter room ID"); return; }
     setLoading(true); setError("");
     const sock = window._swiftSock;
     if (!sock) { setError("Not connected to server yet"); setLoading(false); return; }
 
     sock.emit("join-room",
-      { roomId: roomId.trim().toUpperCase(), name: name.trim(), device: myDevice },
+      { roomId: roomId.trim().toUpperCase(), name: trimmedName, device: myDevice },
       (res) => {
         if (res?.error) { setError(res.error); setLoading(false); return; }
         
         // Save the token so auto-rejoin works!
-        saveSession({ token: res.token, roomId: roomId.trim().toUpperCase(), name: name.trim(), device: myDevice, isHost: false });
+        saveSession({ token: res.token, roomId: roomId.trim().toUpperCase(), name: trimmedName, device: myDevice, isHost: false });
         
         useStore.setState({
           role:   "guest",
           roomId: roomId.trim().toUpperCase(),
-          myName: name.trim(),
+          myName: trimmedName,
           isHost: false,
           hostId: res.hostId,
           peers:  res.peers || [],
@@ -94,6 +120,7 @@ export default function SetupView() {
         <div className="setup-form">
           <input className="input" placeholder="Your display name"
             value={name} onChange={e => setName(e.target.value)}
+            maxLength={MAX_USERNAME_LENGTH}
             onKeyDown={e => e.key === "Enter" && (tab === "host" ? createRoom() : joinRoom())}
             autoFocus />
 

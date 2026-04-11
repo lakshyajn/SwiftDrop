@@ -9,7 +9,9 @@ export const useStore = create((set, get) => ({
   isHost:          false,
   pendingRoom:     null,
   sessionEndedMsg: null,
-  leaveStatus:     null, // "pending" | "denied"
+  leaveStatus:     null,       // "pending" | "denied"
+  pendingHostCreate: null,     // { roomId, name, device } — waiting for host-create-approved
+  hostCreateError:   null,     // string — shown in create-room UI on failure/denial
 
   roomSettings: {
     allowGuestToGuest:      false,
@@ -24,6 +26,7 @@ export const useStore = create((set, get) => ({
   peers:       [],
   hostId:      null,
   leaveRequests: [], // [{ peerId, name }] — host sees these
+  hostCreateRequests: [], // [{ requestId, name, ip, roomId, requestedAt }]
 
   incomingRequests: [],
   activeTransfers:  {},
@@ -41,6 +44,13 @@ export const useStore = create((set, get) => ({
   })),
   removeLeaveRequest: (peerId) => set(s => ({
     leaveRequests: s.leaveRequests.filter(r => r.peerId !== peerId),
+  })),
+
+  addHostCreateRequest: (req) => set(s => ({
+    hostCreateRequests: [...s.hostCreateRequests.filter(r => r.requestId !== req.requestId), req],
+  })),
+  removeHostCreateRequest: (requestId) => set(s => ({
+    hostCreateRequests: s.hostCreateRequests.filter(r => r.requestId !== requestId),
   })),
 
   addIncomingRequest: (req) => set(s => ({
@@ -90,7 +100,8 @@ export const useStore = create((set, get) => ({
   reset: () => set({
     role: null, roomId: null, isHost: false, pendingRoom: null,
     sessionEndedMsg: null, leaveStatus: null,
-    peers: [], hostId: null, leaveRequests: [],
+    pendingHostCreate: null, hostCreateError: null,
+    peers: [], hostId: null, leaveRequests: [], hostCreateRequests: [],
     incomingRequests: [], activeTransfers: {},
     completedTransfers: [], outgoingQueue: [],
     roomSettings: {

@@ -46,15 +46,18 @@ export default function HostView() {
   const {
     peers, roomId, myName, activeTransfers, outgoingQueue, completedTransfers,
     roomSettings, leaveRequests, removeLeaveRequest, incomingRequests,
+    hostCreateRequests, removeHostCreateRequest,
   } = useStore();
   const {
     sendFileRequest, broadcastFile, kickPeer, endSession,
     updateSettings, approveLeave, denyLeave, acceptRequest, rejectRequest, cancelOutgoing,
+    approveHostCreate, denyHostCreate,
   } = useSwiftDrop();
 
   const [selectedPeer,  setSelectedPeer]  = useState(null);
   const [showBroadcast, setShowBroadcast] = useState(false);
   const [showSettings,  setShowSettings]  = useState(false);
+  const [showEndConfirm, setShowEndConfirm] = useState(false);
   const [dragOver,      setDragOver]      = useState(false);
   const [roomQR,        setRoomQR]        = useState(null);
   const [roomUrl,       setRoomUrl]       = useState(null);
@@ -175,9 +178,7 @@ export default function HostView() {
           <button className="btn-broadcast" onClick={() => setShowBroadcast(true)} disabled={guests.length === 0}>
             📡 Broadcast to All
           </button>
-          <button className="btn-end" onClick={() => {
-            if (window.confirm("End session for all devices?")) endSession();
-          }}>
+          <button className="btn-end" onClick={() => setShowEndConfirm(true)}>
             End Session
           </button>
         </div>
@@ -204,6 +205,37 @@ export default function HostView() {
                     <button
                       className="leave-card-deny"
                       onClick={() => { denyLeave(req.peerId); removeLeaveRequest(req.peerId); }}
+                    >Deny</button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {hostCreateRequests.length > 0 && (
+          <div className="host-create-requests-main">
+            {hostCreateRequests.map(req => (
+              <div key={req.requestId} className="host-create-card">
+                <div className="host-create-card-icon">🛡️</div>
+                <div className="host-create-card-body">
+                  <div className="host-create-card-msg">
+                    <strong>{req.name}</strong> ({req.ip}) is trying to host on this network
+                  </div>
+                  <div className="host-create-card-actions">
+                    <button
+                      className="host-create-allow"
+                      onClick={() => {
+                        approveHostCreate(req.requestId);
+                        removeHostCreateRequest(req.requestId);
+                      }}
+                    >Allow</button>
+                    <button
+                      className="host-create-deny"
+                      onClick={() => {
+                        denyHostCreate(req.requestId);
+                        removeHostCreateRequest(req.requestId);
+                      }}
                     >Deny</button>
                   </div>
                 </div>
@@ -335,6 +367,36 @@ export default function HostView() {
           onSend={f => { broadcastFile(f); setShowBroadcast(false); }}
           onClose={() => setShowBroadcast(false)}
         />
+      )}
+
+      {showEndConfirm && (
+        <div className="modal-overlay" onClick={() => setShowEndConfirm(false)}>
+          <div className="modal end-session-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <span>⚠️ End Session</span>
+              <button onClick={() => setShowEndConfirm(false)}>✕</button>
+            </div>
+            <div className="modal-body">
+              <p className="end-session-copy">
+                Do you really want to disconnect all devices and end this session?
+              </p>
+              <div className="end-session-actions">
+                <button className="btn-cancel" onClick={() => setShowEndConfirm(false)}>
+                  Cancel
+                </button>
+                <button
+                  className="btn-end-confirm"
+                  onClick={() => {
+                    setShowEndConfirm(false);
+                    endSession();
+                  }}
+                >
+                  End Session
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

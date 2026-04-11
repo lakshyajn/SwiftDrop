@@ -198,9 +198,13 @@ function advanceQueue(peerId) {
 // ═══════════════════════════════════════════════════════════════════════════════
 export function setServerConfig(c) { _serverConfig = c; }
 const SESSION_KEY = "swiftdrop_session";
+const GUEST_SESSION_ENDED_KEY = "swiftdrop_guest_session_ended";
 export function saveSession(data)  { try { localStorage.setItem(SESSION_KEY, JSON.stringify(data)); } catch (_) {} }
 export function loadSession()      { try { return JSON.parse(localStorage.getItem(SESSION_KEY)); } catch (_) { return null; } }
 export function clearSession()     { try { localStorage.removeItem(SESSION_KEY); } catch (_) {} }
+export function markGuestSessionEnded() { try { localStorage.setItem(GUEST_SESSION_ENDED_KEY, "1"); } catch (_) {} }
+export function clearGuestSessionEnded() { try { localStorage.removeItem(GUEST_SESSION_ENDED_KEY); } catch (_) {} }
+export function isGuestSessionEnded() { try { return localStorage.getItem(GUEST_SESSION_ENDED_KEY) === "1"; } catch (_) { return false; } }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // WebRTC — build PeerConnection
@@ -444,12 +448,19 @@ function sendOverChannel(transferId, file, toPeerId, toPeerName) {
       console.error(`🚨 Sender stalled on ${transferId}`);
       if (isBroadcastTransfer(transferId)) {
         console.warn(`♻️ Re-queuing stalled broadcast peer (${transferId})`);
+        // cleanup() wipes _pendFiles[transferId] and _sending[transferId].
+        // Call it first, then restore from the persistent registry.
         cleanup(transferId);
+        delete _activeTransferPeer[toPeerId]; // clear stale slot
         _activeBroadcastCount = Math.max(0, _activeBroadcastCount - 1);
-        // Re-queue the peer so they get another attempt
+        // Restore file from persistent registry (never wiped by cleanup)
+        const bcId = transferId.match(/^(bc-\d+)/)?.[1];
+        _pendFiles[transferId] = bcId ? _broadcastFiles[bcId] : undefined;
+        if (!_pendFiles[transferId]) {
+          console.error(`♻️ Cannot retry ${transferId} — file no longer in registry`);
+          return;
+        }
         _broadcastSendQueue.push({ from: toPeerId, transferId, peerName: toPeerName });
-        // Restore the file reference before retrying
-        _pendFiles[transferId] = file;
         processBroadcastQueue();
       } else {
         useStore.getState().updateOutgoing(transferId, { status: "stalled" });
@@ -616,6 +627,7 @@ function cleanup(transferId) {
   delete _dataChans[transferId];
   delete _recvBufs[transferId];
   delete _pendFiles[transferId];
+  delete _sending[transferId];          // must clear so retry path isn't blocked
   clearStallTimer(transferId);
   if (_streamWriters[transferId]) {
     _streamWriters[transferId].close().catch(() => {});
@@ -683,15 +695,64 @@ export function useSwiftDrop() {
       console.log(`📢 Broadcast sent to ${count} peers (${transferId})`);
     });
 
-    sock.on("kicked", () => { clearSession(); useStore.getState().reset(); window.location.href = "/"; });
+    sock.on("kicked", () => {
+      clearSession();
+      clearGuestSessionEnded();
+      useStore.getState().reset();
+      window.location.href = "/";
+    });
     sock.on("session-ended", () => {
-      clearSession(); useStore.getState().reset();
+      const wasHost = !!useStore.getState().isHost;
+      clearSession();
       // Clear any lingering broadcast state
       Object.keys(_broadcastFiles).forEach(k => delete _broadcastFiles[k]);
       _broadcastSendQueue.length = 0;
       _activeBroadcastCount = 0;
-      window.alert("The host has ended this session.");
-      window.location.href = "/";
+      if (wasHost) {
+        clearGuestSessionEnded();
+        useStore.getState().reset();
+        return;
+      }
+      markGuestSessionEnded();
+      useStore.setState({
+        sessionEndedMsg: "The session has been ended by the host.",
+        leaveStatus: null,
+      });
+    });
+
+    sock.on("host-create-request", (req) => {
+      useStore.getState().addHostCreateRequest(req);
+    });
+
+    // Approval granted — re-emit create-room immediately with the same params.
+    // The server marks the socket as approved for a 2-min window so this succeeds.
+    sock.on("host-create-approved", ({ requestId }) => {
+      useStore.getState().removeHostCreateRequest(requestId);
+      const state = useStore.getState();
+      // Pull the pending room info that was stored when the first create-room attempt was made
+      const pending = state.pendingHostCreate;
+      if (!pending) return;
+      useStore.setState({ pendingHostCreate: null });
+      sock.emit("create-room", { roomId: pending.roomId, name: pending.name, device: pending.device }, (res) => {
+        if (res.error) {
+          useStore.setState({ hostCreateError: res.error });
+          return;
+        }
+        if (res.ok) {
+          useStore.setState({
+            role: "host", roomId: pending.roomId, myName: pending.name,
+            myDevice: pending.device, isHost: true,
+            roomSettings: res.settings, pendingRoom: null,
+          });
+          // saveSession is imported at module level
+          saveSession({ name: pending.name, device: pending.device, token: res.token });
+        }
+      });
+    });
+
+    sock.on("host-create-denied", ({ requestId, message }) => {
+      useStore.getState().removeHostCreateRequest(requestId);
+      useStore.setState({ pendingHostCreate: null, hostCreateError: message || "Request denied." });
     });
 
     sock.on("file-request", (req) => {
@@ -749,7 +810,12 @@ export function useSwiftDrop() {
       if (role === "receiver") useStore.getState().completeTransfer(transferId);
     });
 
-    sock.on("leave-approved",      ()               => { clearSession(); useStore.getState().reset(); useStore.setState({ sessionEndedMsg: "You have left the room." }); });
+    sock.on("leave-approved",      ()               => {
+      clearSession();
+      clearGuestSessionEnded();
+      useStore.getState().reset();
+      useStore.setState({ sessionEndedMsg: "You have left the room." });
+    });
     sock.on("leave-denied",        ()               => useStore.setState({ leaveStatus: "denied" }));
     sock.on("guest-leave-request", ({ peerId, name }) => useStore.getState().addLeaveRequest({ peerId, name }));
 
@@ -842,6 +908,7 @@ export function useSwiftDrop() {
   const endSession     = useCallback(() => {
     _socket?.emit("end-session");
     clearSession();
+    clearGuestSessionEnded();
     useStore.getState().reset();
     useStore.setState({ sessionEndedMsg: "Session ended." });
     // Clear persistent broadcast registry and queue so memory is freed
@@ -850,8 +917,44 @@ export function useSwiftDrop() {
     _activeBroadcastCount = 0;
   }, []);
   const updateSettings = useCallback((patch)  => _socket?.emit("update-room-settings", patch), []);
+  const approveHostCreate = useCallback((requestId) => _socket?.emit("approve-host-create", { requestId }), []);
+  const denyHostCreate = useCallback((requestId) => _socket?.emit("deny-host-create", { requestId }), []);
 
-  return { initSocket, sendFileRequest, broadcastFile, acceptRequest, rejectRequest, cancelOutgoing, kickPeer, requestLeave, approveLeave, denyLeave, endSession, updateSettings };
+  // createRoom — wraps create-room emit and handles the pendingApproval flow.
+  // When networkHostApproverId is set on the server, the first attempt returns
+  // { pendingApproval: true }. We store the params so the host-create-approved
+  // handler can re-try automatically without the user doing anything.
+  const createRoom = useCallback((roomId, name, device) => {
+    useStore.setState({ hostCreateError: null });
+    _socket?.emit("create-room", { roomId, name, device }, (res) => {
+      if (res.pendingApproval) {
+        // Store params for the approved handler to re-use
+        useStore.setState({ pendingHostCreate: { roomId, name, device } });
+        return;
+      }
+      if (res.error) {
+        useStore.setState({ hostCreateError: res.error });
+        return;
+      }
+      if (res.ok) {
+        useStore.setState({
+          role: "host", roomId, myName: name,
+          myDevice: device, isHost: true,
+          roomSettings: res.settings, pendingRoom: null,
+          hostCreateError: null, pendingHostCreate: null,
+        });
+        saveSession({ name, device, token: res.token });
+        if (!_socket) return;
+        // Set networkHostApproverId on first successful creation
+      }
+    });
+  }, []);
+
+  return {
+    initSocket, sendFileRequest, broadcastFile, acceptRequest, rejectRequest,
+    cancelOutgoing, kickPeer, requestLeave, approveLeave, denyLeave,
+    endSession, updateSettings, approveHostCreate, denyHostCreate, createRoom,
+  };
 }
 
 export function resolveBroadcastFile(transferId) {

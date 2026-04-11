@@ -420,6 +420,11 @@ body,
   cursor: pointer;
 }
 
+.btn-end:hover {
+  background: rgba(239, 68, 68, .16);
+  border-color: rgba(239, 68, 68, .5);
+}
+
 /* ─── PeerCard ─────────────────────────────────────────────────────────────── */
 .peer-card {
   display: flex;
@@ -1146,6 +1151,55 @@ body,
   margin: 0;
 }
 
+.end-session-modal {
+  max-width: 420px;
+}
+
+.end-session-copy {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.end-session-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.btn-cancel {
+  padding: 9px 14px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-cancel:hover {
+  border-color: #3a3a3a;
+}
+
+.btn-end-confirm {
+  padding: 9px 14px;
+  background: rgba(239, 68, 68, .16);
+  border: 1px solid rgba(239, 68, 68, .45);
+  border-radius: 8px;
+  color: #fecaca;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.btn-end-confirm:hover {
+  background: rgba(239, 68, 68, .24);
+  border-color: rgba(239, 68, 68, .65);
+}
+
 /* ─── Settings panel ───────────────────────────────────────────────────────── */
 .settings-wrap {
   position: relative;
@@ -1392,6 +1446,77 @@ body,
 .leave-card-deny:hover {
   background: rgba(239, 68, 68, .22);
   transform: scale(1.04);
+}
+
+.host-create-requests-main {
+  position: sticky;
+  top: 16px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 16px 8px;
+}
+
+.host-create-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 18px;
+  background: rgba(59, 130, 246, .08);
+  border: 1px solid rgba(59, 130, 246, .35);
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, .2);
+}
+
+.host-create-card-icon {
+  font-size: 22px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.host-create-card-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.host-create-card-msg {
+  font-size: 13px;
+  color: #bfdbfe;
+  line-height: 1.4;
+}
+
+.host-create-card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.host-create-allow,
+.host-create-deny {
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.host-create-allow {
+  color: #022c22;
+  background: rgba(34, 197, 94, .9);
+  border: 1px solid rgba(34, 197, 94, 1);
+}
+
+.host-create-deny {
+  color: #fecaca;
+  background: rgba(239, 68, 68, .16);
+  border: 1px solid rgba(239, 68, 68, .45);
+}
+
+.setup-approval-sub {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 
