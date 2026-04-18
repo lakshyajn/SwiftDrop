@@ -208,6 +208,7 @@ let   _activeTransferPeer = {};
 // can always resolve the file regardless of when they accept.
 // Cleared only on reset() / endSession().
 const _broadcastFiles    = {};  // bcId → File
+const _stalledRetryState = {};  // transferId → { tries, file, toPeerId, toPeerName }
 
 // Streaming writers (FSAPI), stall timers, async write queues
 const _streamWriters = {};   // transferId → FileSystemWritableFileStream
@@ -248,6 +249,32 @@ function clearStallTimer(transferId) {
     clearInterval(_stallTimers[transferId]);
     delete _stallTimers[transferId];
   }
+}
+
+function retryStalledTransfer(transferId, file, toPeerId, toPeerName) {
+  const state = _stalledRetryState[transferId] || { tries: 0, file, toPeerId, toPeerName };
+  state.tries += 1;
+  state.file = file;
+  state.toPeerId = toPeerId;
+  state.toPeerName = toPeerName;
+  _stalledRetryState[transferId] = state;
+
+  const MAX_RETRIES = 3;
+  if (state.tries > MAX_RETRIES) {
+    console.warn(`🛑 Retry limit reached for ${transferId}; moving to next queued file.`);
+    delete _stalledRetryState[transferId];
+    return false;
+  }
+
+  console.warn(`♻️ Retrying stalled transfer ${transferId} (attempt ${state.tries}/${MAX_RETRIES})`);
+  useStore.getState().updateOutgoing(transferId, { status: "retrying" });
+  setTimeout(() => {
+    _pendFiles[transferId] = file;
+    createOffer(transferId, toPeerId, toPeerName).catch(err => {
+      console.error(`Retry offer failed for ${transferId}:`, err);
+    });
+  }, 1000);
+  return true;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -545,7 +572,13 @@ function sendOverChannel(transferId, file, toPeerId, toPeerName) {
         enqueueBroadcastJob({ from: toPeerId, transferId, peerName: toPeerName });
         processBroadcastQueue();
       } else {
-        useStore.getState().updateOutgoing(transferId, { status: "stalled" });
+        const retried = retryStalledTransfer(transferId, file, toPeerId, toPeerName);
+        cleanup(transferId);
+        delete _activeTransferPeer[toPeerId];
+        if (!retried) {
+          useStore.getState().updateOutgoing(transferId, { status: "stalled" });
+          advanceQueue(toPeerId);
+        }
       }
     },
   );
@@ -665,6 +698,7 @@ function sendOverChannel(transferId, file, toPeerId, toPeerName) {
     useStore.getState().updateOutgoing(transferId, { status: "done" });
     _socket?.emit("transfer-complete", { peerId: toPeerId, transferId, role: "sender" });
     delete _sending[transferId];
+    delete _stalledRetryState[transferId];
 
     // Delay cleanup so receiver can finish before we tear down PC
     setTimeout(() => {
@@ -715,6 +749,7 @@ function cleanup(transferId) {
   delete _dataChans[transferId];
   delete _recvBufs[transferId];
   delete _pendFiles[transferId];
+  delete _stalledRetryState[transferId];
   delete _sending[transferId];          // must clear so retry path isn't blocked
   clearStallTimer(transferId);
   if (_streamWriters[transferId]) {
@@ -955,7 +990,7 @@ export function useSwiftDrop() {
   }, []);
 
   const broadcastFile = useCallback((file) => {
-    const transferId = `bc-${Date.now()}`;
+    const transferId = `bc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const recipients = (useStore.getState().peers || []).filter(p => !p.isHost).length;
     if (_activeBroadcastCount === 0 && _broadcastSendQueue.length === 0) {
       resetBroadcastController(recipients);
@@ -969,6 +1004,11 @@ export function useSwiftDrop() {
     _broadcastFiles[transferId] = file;
     _socket?.emit("broadcast-file", { transferId, fileInfo: { name: file.name, size: file.size, type: file.type } });
   }, []);
+
+  const broadcastFiles = useCallback((files) => {
+    const list = Array.from(files || []);
+    list.forEach((file) => broadcastFile(file));
+  }, [broadcastFile]);
 
   // acceptRequest: uses FSAPI streaming for large files on supported browsers,
   // otherwise falls back to memory path with partial blob flush.
@@ -1054,14 +1094,14 @@ export function useSwiftDrop() {
     initSocket, sendFileRequest, broadcastFile, acceptRequest, rejectRequest,
     cancelOutgoing, kickPeer, requestLeave, approveLeave, denyLeave,
     endSession, updateSettings, approveHostCreate, denyHostCreate, createRoom,
+    broadcastFiles,
   };
 }
 
 export function resolveBroadcastFile(transferId) {
   if (_pendFiles[transferId]) return; // already resolved
-  const m = transferId.match(/^(bc-\d+)__/);
-  if (!m) return;
-  const bcId = m[1];
+  const bcId = transferId.startsWith("bc-") ? transferId.split("__")[0] : null;
+  if (!bcId) return;
   // Primary: persistent registry — always available even after original peers complete
   if (_broadcastFiles[bcId]) {
     _pendFiles[transferId] = _broadcastFiles[bcId];

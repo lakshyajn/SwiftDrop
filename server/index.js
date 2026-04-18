@@ -8,7 +8,8 @@ const path       = require("path");
 
 const PORT     = process.env.PORT || 3001;
 const FRONTEND_PORT = 5173;
-const IS_LOCAL = !process.env.PORT;
+const IS_LOCAL = process.env.ELECTRON_APP === "1" || !process.env.PORT;
+const LOCAL_UI_PORT = process.env.ELECTRON_APP === "1" ? PORT : FRONTEND_PORT;
 const MAX_USERNAME_LENGTH = 20;
 
 const SUBNET_PRIORITY = [
@@ -131,7 +132,7 @@ app.use(express.json());
 if (process.env.NODE_ENV === "production") {
   app.use(express.static(path.join(__dirname, "../client/dist")));
 
-  app.get(/.*/, (_, res) =>
+  app.get(/^\/(?!api\/|socket\.io\/).*/, (_, res) =>
     res.sendFile(path.join(__dirname, "../client/dist/index.html"))
   );
 }
@@ -656,13 +657,13 @@ io.on("connection", (socket) => {
       console.log(`✅ Transfer complete (receiver confirmed): ${transferId}`);
 
       // Decrement active broadcast tracking
-      const bcMatch = transferId.match(/^(bc-\d+)__/);
-      if (bcMatch && room.activeBroadcasts?.[bcMatch[1]]) {
-        const ab = room.activeBroadcasts[bcMatch[1]];
+      const bcMatch = String(transferId || "").startsWith("bc-") ? String(transferId).split("__")[0] : null;
+      if (bcMatch && room.activeBroadcasts?.[bcMatch]) {
+        const ab = room.activeBroadcasts[bcMatch];
         ab.pendingPeers.delete(socket.id);
         if (ab.pendingPeers.size === 0) {
-          delete room.activeBroadcasts[bcMatch[1]];
-          console.log(`📡 Broadcast ${bcMatch[1]} fully delivered`);
+          delete room.activeBroadcasts[bcMatch];
+          console.log(`📡 Broadcast ${bcMatch} fully delivered`);
         }
       }
     } else {
@@ -785,14 +786,14 @@ function doLeave(socket, roomId) {
 }
 
 app.get("/api/server-info", async (req, res) => {
-  const url = IS_LOCAL ? `http://${HOST_IP}:${FRONTEND_PORT}` : `https://${req.headers.host}`;
+  const url = IS_LOCAL ? `http://${HOST_IP}:${LOCAL_UI_PORT}` : `https://${req.headers.host}`;
   const qr  = await QRCode.toDataURL(url, { width: 280, margin: 2, color: { dark: "#22c55e", light: "#0a0a0f" } });
   res.json({ ip: HOST_IP, port: PORT, url, qr, isLocal: IS_LOCAL,
     turnIp: HOST_IP, turnPort: 3478, turnUser: "swiftdrop", turnPass: "swiftpass" });
 });
 
 app.get("/api/room-qr/:roomId", async (req, res) => {
-  const base = IS_LOCAL ? `http://${HOST_IP}:${FRONTEND_PORT}` : `https://${req.headers.host}`;
+  const base = IS_LOCAL ? `http://${HOST_IP}:${LOCAL_UI_PORT}` : `https://${req.headers.host}`;
   const url  = `${base}?room=${req.params.roomId}`;
   const qr   = await QRCode.toDataURL(url, { width: 280, margin: 2, color: { dark: "#22c55e", light: "#0a0a0f" } });
   res.json({ url, qr });

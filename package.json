@@ -1,0 +1,35 @@
+{
+  "name": "swiftdrop",
+  "version": "1.0.0",
+  "description": "Fast, secure peer-to-peer file sharing on local networks",
+  "main": "electron/main.js",
+  "homepage": "./",
+  "scripts": {
+    "dev": "concurrently \"npm run server:dev\" \"npm run client:dev\"",
+    "client:dev": "npm run dev --prefix client",
+    "server:dev": "node server/index.js",
+    "build": "npm run build --prefix client",
+    "electron:dev": "npm run build && electron .",
+    "electron:build": "npm run build && electron-builder",
+    "electron:build:win": "npm run build && electron-builder --win",
+    "electron:build:mac": "npm run build && electron-builder --mac",
+    "electron:build:linux": "npm run build && electron-builder --linux",
+    "electron:build:all": "npm run build && electron-builder -mwl",
+    "dist": "npm run electron:build:all"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "socket.io": "^4.8.3",
+    "qrcode": "^1.5.4",
+    "cors": "^2.8.6",
+    "node-turn": "^0.0.6"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^25.0.5",
+    "electron-is-dev": "^2.0.0",
+    "concurrently": "^8.2.2"
+  },
+  "author": "",
+  "license": "MIT"
+}

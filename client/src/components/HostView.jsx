@@ -49,7 +49,7 @@ export default function HostView() {
     hostCreateRequests, removeHostCreateRequest, theme, setTheme,
   } = useStore();
   const {
-    sendFileRequest, broadcastFile, kickPeer, endSession,
+    sendFileRequest, broadcastFile, broadcastFiles, kickPeer, endSession,
     updateSettings, approveLeave, denyLeave, acceptRequest, rejectRequest, cancelOutgoing,
     approveHostCreate, denyHostCreate,
   } = useSwiftDrop();
@@ -421,7 +421,11 @@ export default function HostView() {
       {showBroadcast && (
         <BroadcastModal
           peers={guests}
-          onSend={f => { broadcastFile(f); setShowBroadcast(false); }}
+          onSend={(payload) => {
+            if (Array.isArray(payload)) broadcastFiles(payload);
+            else broadcastFile(payload);
+            setShowBroadcast(false);
+          }}
           onClose={() => setShowBroadcast(false)}
         />
       )}

@@ -1,0 +1,85 @@
+{
+  "appId": "com.swiftdrop.app",
+  "productName": "SwiftDrop",
+  "directories": {
+    "buildResources": "assets",
+    "output": "dist/packages"
+  },
+  "files": [
+    "client/dist/**/*",
+    "client/public/**/*",
+    "electron/**/*",
+    "server/**/*",
+    "package.json"
+  ],
+  "win": {
+    "icon": "assets/icon.ico",
+    "signAndEditExecutable": false,
+    "signtoolOptions": {
+      "signingHashAlgorithms": [
+        "sha256"
+      ]
+    },
+    "target": [
+      {
+        "target": "nsis",
+        "arch": [
+          "x64"
+        ]
+      },
+      {
+        "target": "portable",
+        "arch": [
+          "x64"
+        ]
+      }
+    ],
+    "certificateFile": null,
+    "certificatePassword": null
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "SwiftDrop",
+    "installerIcon": "assets/icon.ico",
+    "uninstallerIcon": "assets/icon.ico",
+    "installerSidebar": "assets/Electron_icon.jpg",
+    "uninstallerSidebar": "assets/Electron_icon.jpg"
+  },
+  "mac": {
+    "target": [
+      "dmg",
+      "zip"
+    ],
+    "category": "public.app-category.utilities",
+    "hardenedRuntime": true,
+    "gatekeeperAssess": false
+  },
+  "dmg": {
+    "contents": [
+      {
+        "x": 110,
+        "y": 150,
+        "type": "file"
+      },
+      {
+        "x": 240,
+        "y": 150,
+        "type": "link",
+        "path": "/Applications"
+      }
+    ]
+  },
+  "linux": {
+    "target": [
+      "AppImage",
+      "deb"
+    ],
+    "category": "Utility"
+  },
+  "appImage": {
+    "artifactName": "${name}-${version}.${ext}"
+  }
+}

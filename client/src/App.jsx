@@ -24,7 +24,7 @@ function detectDevice() {
 
 export default function App() {
   const { role, roomId, myName, theme, setTheme, setServerInfo } = useStore();
-  const { initSocket } = useSwiftDrop();
+  const { initSocket, endSession } = useSwiftDrop();
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState(null);
 
@@ -80,6 +80,20 @@ export default function App() {
     localStorage.setItem(THEME_KEY_DEFAULT, theme);
     localStorage.setItem(themeScopeKey(role, roomId, myName), theme);
   }, [theme, role, roomId, myName]);
+
+  useEffect(() => {
+    const isElectron = typeof window !== "undefined" && window.electronAPI;
+    if (!isElectron || !window.electronAPI.onAppClosing) return undefined;
+
+    const dispose = window.electronAPI.onAppClosing(() => {
+      const state = useStore.getState();
+      if (state.role === "host" && state.roomId) {
+        endSession();
+      }
+    });
+
+    return dispose;
+  }, [endSession]);
 
   if (loading) return (
     <div className="loading-screen">
