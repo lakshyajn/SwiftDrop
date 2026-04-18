@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 export const useStore = create((set, get) => ({
+  theme:           "dark",
   role:            null,
   roomId:          null,
   myName:          "",
@@ -34,6 +35,7 @@ export const useStore = create((set, get) => ({
   outgoingQueue:    [],
 
   setServerInfo:   (info)     => set({ serverInfo: info }),
+  setTheme:        (theme)    => set({ theme }),
   setRole:         (role)     => set({ role, isHost: role === "host" }),
   setSession:      (s)        => set(s),
   setPeers:        (peers)    => set({ peers }),

@@ -1,23 +1,45 @@
 import { useEffect, useState } from "react";
 import { useStore }       from "./store";
-import { useSwiftDrop, setServerConfig, clearSession, isGuestSessionEnded, clearGuestSessionEnded } from "./hooks/useSwiftDrop";
+import { useSwiftDrop, setServerConfig, clearGuestSessionEnded } from "./hooks/useSwiftDrop";
 import SetupView  from "./components/SetupView";
 import HostView   from "./components/HostView";
 import GuestView  from "./components/GuestView";
 import "./index.css";
+
+const THEME_KEY_DEFAULT = "swiftdrop_theme_default";
+
+function normalizeTheme(v) {
+  return v === "light" || v === "dark" ? v : null;
+}
+
+function themeScopeKey(role, roomId, myName) {
+  if (!role || !roomId || !myName) return THEME_KEY_DEFAULT;
+  const safeName = String(myName).trim().toLowerCase().replace(/\s+/g, "_");
+  return `swiftdrop_theme_${role}_${roomId}_${safeName}`;
+}
 
 function detectDevice() {
   return /Android|iPhone|iPad/i.test(navigator.userAgent) ? "phone" : "laptop";
 }
 
 export default function App() {
-  const { role, setServerInfo } = useStore();
+  const { role, roomId, myName, theme, setTheme, setServerInfo } = useStore();
   const { initSocket } = useSwiftDrop();
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState(null);
-  const [guestEndedGate, setGuestEndedGate] = useState(isGuestSessionEnded());
 
   useEffect(() => {
+    // Do not persist the guest-ended gate across fresh visits.
+    clearGuestSessionEnded();
+
+    const savedTheme = normalizeTheme(localStorage.getItem(THEME_KEY_DEFAULT));
+    if (savedTheme) {
+      setTheme(savedTheme);
+    } else {
+      const prefersDark = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches;
+      setTheme(prefersDark ? "dark" : "light");
+    }
+
     useStore.setState({ myDevice: detectDevice() });
 
     // Check URL for ?room= param (from QR scan) — auto-switch to guest join
@@ -46,6 +68,19 @@ export default function App() {
       });
   }, []);
 
+  useEffect(() => {
+    const scoped = normalizeTheme(localStorage.getItem(themeScopeKey(role, roomId, myName)));
+    if (scoped && scoped !== theme) {
+      setTheme(scoped);
+    }
+  }, [role, roomId, myName]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem(THEME_KEY_DEFAULT, theme);
+    localStorage.setItem(themeScopeKey(role, roomId, myName), theme);
+  }, [theme, role, roomId, myName]);
+
   if (loading) return (
     <div className="loading-screen">
       <div className="loading-logo">⚡ SwiftDrop</div>
@@ -57,32 +92,6 @@ export default function App() {
     <div className="loading-screen">
       <div className="loading-logo">⚡ SwiftDrop</div>
       <div className="loading-sub" style={{ color: "#ef4444", maxWidth: 320, textAlign: "center" }}>{error}</div>
-    </div>
-  );
-
-  if (guestEndedGate) return (
-    <div className="setup-page">
-      <div className="setup-card">
-        <div className="modal-header">
-          <span>Session Ended</span>
-        </div>
-        <div className="modal-body">
-          <p className="end-session-copy">The session has been ended by the host.</p>
-          <div className="end-session-actions">
-            <button
-              className="btn-end-confirm"
-              onClick={() => {
-                clearSession();
-                clearGuestSessionEnded();
-                useStore.getState().reset();
-                setGuestEndedGate(false);
-              }}
-            >
-              Leave Room
-            </button>
-          </div>
-        </div>
-      </div>
     </div>
   );
 

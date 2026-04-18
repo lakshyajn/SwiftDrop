@@ -46,7 +46,7 @@ export default function HostView() {
   const {
     peers, roomId, myName, activeTransfers, outgoingQueue, completedTransfers,
     roomSettings, leaveRequests, removeLeaveRequest, incomingRequests,
-    hostCreateRequests, removeHostCreateRequest,
+    hostCreateRequests, removeHostCreateRequest, theme, setTheme,
   } = useStore();
   const {
     sendFileRequest, broadcastFile, kickPeer, endSession,
@@ -59,10 +59,12 @@ export default function HostView() {
   const [showSettings,  setShowSettings]  = useState(false);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
   const [dragOver,      setDragOver]      = useState(false);
+  const [folderDragOver, setFolderDragOver] = useState(false);
   const [roomQR,        setRoomQR]        = useState(null);
   const [roomUrl,       setRoomUrl]       = useState(null);
   const [copied,        setCopied]        = useState(false);
   const fileRef     = useRef();
+  const folderRef   = useRef();
   const settingsRef = useRef();
 
   useEffect(() => {
@@ -107,6 +109,21 @@ export default function HostView() {
     sendFileRequest(selectedPeer.id, selectedPeer.name, file);
   };
 
+  const handleFolderFiles = (files) => {
+    const allFiles = Array.from(files || []);
+    if (allFiles.length === 0) return;
+    if (!selectedPeer) { alert("Select a device first"); return; }
+
+    allFiles.forEach((file) => {
+      const relativePath = file.webkitRelativePath || file.name;
+      const normalizedName = relativePath.replace(/^\/+/, "");
+      const namedFile = normalizedName === file.name
+        ? file
+        : new File([file], normalizedName, { type: file.type, lastModified: file.lastModified });
+      sendFileRequest(selectedPeer.id, selectedPeer.name, namedFile);
+    });
+  };
+
   const copyUrl = () => {
     navigator.clipboard.writeText(roomUrl || "").then(() => {
       setCopied(true); setTimeout(() => setCopied(false), 2000);
@@ -129,6 +146,8 @@ export default function HostView() {
   const peerCompleted     = selectedPeer ? completedTransfers.filter(c => c.peerName === selectedPeer.name) : [];
   const peerCompletedSent = peerCompleted.filter(c => c.direction === "sending");
   const peerCompletedRecv = peerCompleted.filter(c => c.direction === "receiving");
+  const guestCountLabel   = `${guests.length}`;
+  const nextTheme         = theme === "dark" ? "light" : "dark";
 
   return (
     <div className="main-layout">
@@ -157,7 +176,11 @@ export default function HostView() {
           )}
         </div>
 
-        <div className="section-label">Devices <span className="badge">{guests.length}</span></div>
+
+        <div className="guest-count-row" aria-live="polite">
+          <span className="guest-count-label">Guests In Room</span>
+          <span className="guest-count-value">{guestCountLabel}</span>
+        </div>
 
         <div className="peer-list">
           {guests.length === 0
@@ -273,6 +296,14 @@ export default function HostView() {
                 {selectedPeer.busy && <span className="busy-pill">BUSY</span>}
               </span>
             )}
+            <button
+              className="theme-btn"
+              onClick={() => setTheme(nextTheme)}
+              title={`Switch to ${nextTheme} mode`}
+              aria-label={`Switch to ${nextTheme} mode`}
+            >
+              {theme === "dark" ? "☀️" : "🌙"}
+            </button>
             <div className="settings-wrap" ref={settingsRef}>
               <button className="settings-btn" onClick={() => setShowSettings(s => !s)} title="Room Settings">⚙️</button>
               {showSettings && (
@@ -332,6 +363,32 @@ export default function HostView() {
               {selectedPeer.busy && (
                 <div className="queue-notice">⏳ Currently busy — file will be queued automatically</div>
               )}
+            </div>
+
+            {/* Folder drop zone */}
+            <div
+              className={`drop-zone folder-drop-zone ${folderDragOver ? "over" : ""}`}
+              onDragOver={e => { e.preventDefault(); setFolderDragOver(true); }}
+              onDragLeave={() => setFolderDragOver(false)}
+              onDrop={e => {
+                e.preventDefault();
+                setFolderDragOver(false);
+                handleFolderFiles(e.dataTransfer.files);
+              }}
+              onClick={() => folderRef.current.click()}
+            >
+              <input
+                type="file"
+                ref={folderRef}
+                style={{ display: "none" }}
+                webkitdirectory=""
+                directory=""
+                multiple
+                onChange={e => { handleFolderFiles(e.target.files); e.target.value = ""; }}
+              />
+              <div className="drop-icon-big">🗂️</div>
+              <div>Drop or click to send a folder to <strong>{selectedPeer.name}</strong></div>
+              <div className="folder-drop-hint">All files in the selected folder will be queued automatically</div>
             </div>
 
             {/* Inbox — files received from this peer */}

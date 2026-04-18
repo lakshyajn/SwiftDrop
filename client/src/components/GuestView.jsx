@@ -22,13 +22,15 @@ function fileIcon(name = "") {
 }
 
 export default function GuestView() {
-  const { peers, roomId, hostId, incomingRequests, activeTransfers, outgoingQueue, completedTransfers, roomSettings, leaveStatus, sessionEndedMsg } = useStore();
+  const { peers, roomId, hostId, myName, incomingRequests, activeTransfers, outgoingQueue, completedTransfers, roomSettings, leaveStatus, sessionEndedMsg, theme, setTheme } = useStore();
   const { acceptRequest, rejectRequest, sendFileRequest, cancelOutgoing, requestLeave } = useSwiftDrop();
 
   const [selectedTarget, setSelectedTarget] = useState(null);
   const [leaveLoading, setLeaveLoading] = useState(false);
   const fileRef = useRef();
+  const folderRef = useRef();
   const hostFileRef = useRef();
+  const hostFolderRef = useRef();
 
   const mySocketId = window._swiftSock?.id;
   const host = peers.find(p => p.isHost);
@@ -44,10 +46,25 @@ export default function GuestView() {
 
   const completedSent = completedTransfers.filter(c => c.direction === "sending");
   const completedReceived = completedTransfers.filter(c => c.direction === "receiving");
+  const nextTheme = theme === "dark" ? "light" : "dark";
 
   const handleSendTo = (peerId, peerName, file) => {
     if (!file) return;
     sendFileRequest(peerId, peerName, file);
+  };
+
+  const handleFolderSendTo = (peerId, peerName, files) => {
+    const allFiles = Array.from(files || []);
+    if (allFiles.length === 0) return;
+
+    allFiles.forEach((file) => {
+      const relativePath = file.webkitRelativePath || file.name;
+      const normalizedName = relativePath.replace(/^\/+/, "");
+      const namedFile = normalizedName === file.name
+        ? file
+        : new File([file], normalizedName, { type: file.type, lastModified: file.lastModified });
+      sendFileRequest(peerId, peerName, namedFile);
+    });
   };
 
   const handleLeave = () => {
@@ -86,9 +103,20 @@ export default function GuestView() {
           </div>
         </div>
 
-        <button className="leave-btn" onClick={handleLeave} disabled={leaveLoading || leaveStatus === "pending"}>
-          {leaveStatus === "pending" ? "Awaiting approval..." : leaveLoading ? "..." : "Leave"}
-        </button>
+        <div className="header-right">
+          <button
+            className="theme-btn"
+            onClick={() => setTheme(nextTheme)}
+            title={`Switch to ${nextTheme} mode`}
+            aria-label={`Switch to ${nextTheme} mode`}
+          >
+            {theme === "dark" ? "☀️" : "🌙"}
+          </button>
+
+          <button className="leave-btn" onClick={handleLeave} disabled={leaveLoading || leaveStatus === "pending"}>
+            {leaveStatus === "pending" ? "Awaiting approval..." : leaveLoading ? "..." : "Leave"}
+          </button>
+        </div>
       </header>
 
       <div className="guest-content">
@@ -130,11 +158,15 @@ export default function GuestView() {
         <div className="devices-section">
           <div className="section-label">Devices</div>
           <div className="devices-grid">
-            {allPeers.map(p => (
-              <div key={p.id} className={`device-chip ${p.isHost ? "host" : ""}`}>
-                {p.device === "phone" ? "📱" : "💻"} {p.name}
-              </div>
-            ))}
+            {allPeers.map(p => {
+              const isMe = p.id === mySocketId;
+              return (
+                <div key={p.id} className={`device-chip ${p.isHost ? "host" : ""} ${isMe ? "me" : ""}`}>
+                  {p.device === "phone" ? "📱" : "💻"} {p.name}
+                  {isMe && <span className="you-tag">You</span>}
+                </div>
+              );
+            })}
           </div>
         </div>
 
@@ -154,6 +186,24 @@ export default function GuestView() {
               />
               <div className="drop-icon-big">📤</div>
               <div>Send to <strong>{host.name}</strong></div>
+            </div>
+
+            <div className="drop-zone folder-drop-zone" onClick={() => hostFolderRef.current.click()}>
+              <input
+                type="file"
+                ref={hostFolderRef}
+                style={{ display: "none" }}
+                webkitdirectory=""
+                directory=""
+                multiple
+                onChange={e => {
+                  handleFolderSendTo(hostId, host.name, e.target.files);
+                  e.target.value = "";
+                }}
+              />
+              <div className="drop-icon-big">🗂️</div>
+              <div>Send folder to <strong>{host.name}</strong></div>
+              <div className="folder-drop-hint">All files in the selected folder will be queued automatically</div>
             </div>
           </div>
         )}
@@ -178,6 +228,22 @@ export default function GuestView() {
               ))}
             </div>
 
+            <div
+              className={`drop-zone folder-drop-zone ${!selectedTarget ? "disabled-zone" : ""}`}
+              onClick={() => {
+                if (!selectedTarget) return;
+                folderRef.current?.click();
+              }}
+            >
+              <div className="drop-icon-big">🗂️</div>
+              <div>
+                {!selectedTarget
+                  ? "Select a guest, then send a folder"
+                  : <>Send folder to <strong>{selectedTarget.name}</strong></>}
+              </div>
+              <div className="folder-drop-hint">All files in the selected folder will be queued automatically</div>
+            </div>
+
             <input
               type="file"
               ref={fileRef}
@@ -185,6 +251,21 @@ export default function GuestView() {
               onChange={e => {
                 if (selectedTarget && e.target.files[0]) {
                   handleSendTo(selectedTarget.id, selectedTarget.name, e.target.files[0]);
+                }
+                e.target.value = "";
+              }}
+            />
+
+            <input
+              type="file"
+              ref={folderRef}
+              style={{ display: "none" }}
+              webkitdirectory=""
+              directory=""
+              multiple
+              onChange={e => {
+                if (selectedTarget && e.target.files?.length) {
+                  handleFolderSendTo(selectedTarget.id, selectedTarget.name, e.target.files);
                 }
                 e.target.value = "";
               }}
