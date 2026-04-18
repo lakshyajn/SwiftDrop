@@ -18,16 +18,89 @@ const SUBNET_PRIORITY = [
 
 function getBestIP() {
   const ifaces = os.networkInterfaces();
-  const all = [];
-  for (const name of Object.keys(ifaces))
-    for (const iface of ifaces[name])
-      if (iface.family === "IPv4" && !iface.internal)
-        all.push({ name, address: iface.address });
-  for (const subnet of SUBNET_PRIORITY) {
-    const match = all.find(c => c.address.startsWith(subnet));
-    if (match) return match.address;
+  const candidates = [];
+
+  // Collect all non-internal IPv4 addresses with interface metadata
+  for (const name of Object.keys(ifaces)) {
+    for (const iface of ifaces[name]) {
+      if (iface.family === "IPv4" && !iface.internal) {
+        candidates.push({ name, address: iface.address });
+      }
+    }
   }
-  return all[0]?.address || "127.0.0.1";
+
+  // Try to find the default gateway interface (usually the primary network connection)
+  // On most systems, this is the interface used for outbound traffic
+  try {
+    const { execSync } = require("child_process");
+    let defaultIface = null;
+    
+    if (process.platform === "win32") {
+      // Windows: query routing table for default gateway
+      try {
+        const output = execSync("route print 0.0.0.0", { encoding: "utf8" });
+        const lines = output.split("\n");
+        for (const line of lines) {
+          const match = line.match(/\s+([\d.]+)\s+/);
+          if (match) {
+            const ip = match[1];
+            if (ip && ip !== "0.0.0.0" && ip !== "255.255.255.255") {
+              defaultIface = candidates.find(c => {
+                const parts = c.address.split(".");
+                const ipParts = ip.split(".");
+                return parts.slice(0, 3).join(".") === ipParts.slice(0, 3).join(".");
+              });
+              if (defaultIface) break;
+            }
+          }
+        }
+      } catch (e) { /* fallback */ }
+    } else if (process.platform === "darwin") {
+      // macOS: route -n get default
+      try {
+        const output = execSync("route -n get default 2>/dev/null || route get default", { encoding: "utf8" });
+        const match = output.match(/interface:\s+(\w+)/);
+        if (match) {
+          const ifaceName = match[1];
+          defaultIface = candidates.find(c => c.name === ifaceName);
+        }
+      } catch (e) { /* fallback */ }
+    } else {
+      // Linux: ip route show default
+      try {
+        const output = execSync("ip route show default 2>/dev/null || netstat -r 2>/dev/null | grep default", { encoding: "utf8" });
+        const match = output.match(/via\s+[\d.]+\s+dev\s+(\w+)|default\s+via\s+[\d.]+\s+dev\s+(\w+)/);
+        if (match) {
+          const ifaceName = match[1] || match[2];
+          defaultIface = candidates.find(c => c.name === ifaceName);
+        }
+      } catch (e) { /* fallback */ }
+    }
+
+    if (defaultIface) {
+      console.log(`🌐 Using default gateway interface: ${defaultIface.name} (${defaultIface.address})`);
+      return defaultIface.address;
+    }
+  } catch (e) { /* fallback to static detection */ }
+
+  // Fallback 1: Try hardcoded subnet priority (for known dev environments)
+  for (const subnet of SUBNET_PRIORITY) {
+    const match = candidates.find(c => c.address.startsWith(subnet));
+    if (match) {
+      console.log(`🌐 Using known subnet: ${match.name} (${match.address})`);
+      return match.address;
+    }
+  }
+
+  // Fallback 2: Use first available non-internal IPv4
+  if (candidates.length > 0) {
+    console.log(`🌐 Using first available interface: ${candidates[0].name} (${candidates[0].address})`);
+    return candidates[0].address;
+  }
+
+  // Fallback 3: Localhost
+  console.log(`⚠️ No network interface found, using localhost`);
+  return "127.0.0.1";
 }
 
 function startTURN(ip) {
@@ -82,6 +155,7 @@ const sessionTokens = {};
 let networkHostApproverId = null;
 let networkHostApproverToken = null;
 let networkHostApproverReleaseTimer = null;
+const APPROVER_GRACE_MS = 30000;
 const approvedHostCreators = {};      // socketId -> expiresAt
 const pendingHostCreateRequests = {}; // requestId -> { requesterSocketId, name, ip, roomId, requestedAt }
 const pendingHostCreateTimers = {};   // requestId -> timeout
@@ -149,6 +223,56 @@ function clearAllHostCreateApprovalState() {
   }
 }
 
+function getConnectedApproverSocket() {
+  if (!networkHostApproverId) return null;
+  return io.sockets.sockets.get(networkHostApproverId) || null;
+}
+
+function getConnectedHosts() {
+  const hosts = [];
+  for (const [roomId, room] of Object.entries(rooms)) {
+    room.peers.forEach((peer) => {
+      if (!peer.isHost) return;
+      if (!io.sockets.sockets.get(peer.id)) return;
+      hosts.push({ roomId, peer });
+    });
+  }
+  return hosts;
+}
+
+function tryRecoverApproverFromToken() {
+  if (!networkHostApproverToken) return false;
+  const hosts = getConnectedHosts();
+  const owner = hosts.find(h => h.peer.token === networkHostApproverToken);
+  if (!owner) return false;
+  clearApproverReleaseTimer();
+  networkHostApproverId = owner.peer.id;
+  return true;
+}
+
+function electApproverFromConnectedHosts() {
+  const hosts = getConnectedHosts();
+  if (hosts.length === 0) {
+    networkHostApproverId = null;
+    networkHostApproverToken = null;
+    return false;
+  }
+  hosts.sort((a, b) => (a.peer.joinedAt || 0) - (b.peer.joinedAt || 0));
+  const winner = hosts[0].peer;
+  networkHostApproverId = winner.id;
+  networkHostApproverToken = winner.token;
+  clearApproverReleaseTimer();
+  console.log(`🛡️ Approver elected: ${winner.name} (${winner.id})`);
+  return true;
+}
+
+function ensureNetworkApprover() {
+  if (getConnectedApproverSocket()) return true;
+  networkHostApproverId = null;
+  if (tryRecoverApproverFromToken()) return true;
+  return electApproverFromConnectedHosts();
+}
+
 function makeRoom(roomId, hostId, hostName, hostDevice) {
   const token = makeToken();
   sessionTokens[token] = { roomId, name: hostName, device: hostDevice, isHost: true };
@@ -199,12 +323,7 @@ io.on("connection", (socket) => {
       clearAllHostCreateApprovalState();
     }
 
-    if (networkHostApproverId) {
-      const approverSocket = io.sockets.sockets.get(networkHostApproverId);
-      if (!approverSocket) {
-        networkHostApproverId = null;
-      }
-    }
+    ensureNetworkApprover();
 
     if (!networkHostApproverId && networkHostApproverToken) {
       ack({ error: "Room-creation approver is offline. Wait for the original host to reconnect." });
@@ -602,9 +721,14 @@ io.on("connection", (socket) => {
       networkHostApproverId = null;
       clearApproverReleaseTimer();
       networkHostApproverReleaseTimer = setTimeout(() => {
-        if (!networkHostApproverId) networkHostApproverToken = null;
+        // Approver did not come back in grace window — recover from token owner
+        // or elect a new connected host automatically.
+        if (!networkHostApproverId) {
+          const recovered = tryRecoverApproverFromToken();
+          if (!recovered) electApproverFromConnectedHosts();
+        }
         networkHostApproverReleaseTimer = null;
-      }, 30000);
+      }, APPROVER_GRACE_MS);
       for (const [requestId, req] of Object.entries(pendingHostCreateRequests)) {
         io.to(req.requesterSocketId).emit("host-create-denied", {
           requestId,

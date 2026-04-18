@@ -67,6 +67,9 @@ const STALL_TIMEOUT_MS  = 15000;    // 15 s no-progress → stalled (was 60 s)
 const BP_INITIAL_MS     = 5000;     // initial backpressure timeout
 const BP_MIN_MS         = 2000;
 const BP_MAX_MS         = 30000;
+const BROADCAST_WATCHDOG_MS = 3000;
+const BROADCAST_STUCK_MS    = 6000;
+const BROADCAST_HARD_MAX    = 20;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Adaptive Broadcast Concurrency
@@ -74,18 +77,94 @@ const BP_MAX_MS         = 30000;
 // Each channel is independent (separate PC + DataChannel), so bandwidth is
 // divided across active slots. 20 is a safe ceiling for a laptop host.
 // ═══════════════════════════════════════════════════════════════════════════════
+function clamp(n, lo, hi) {
+  return Math.max(lo, Math.min(hi, n));
+}
+
+function getBroadcastRecipientCount() {
+  return Math.max(_broadcastRecipientCount, _activeBroadcastCount + _broadcastSendQueue.length);
+}
+
 function getMaxBroadcastSlots() {
-  // Ramp up as active count grows — start with a burst then plateau
-  if (_activeBroadcastCount === 0)  return 8;
-  if (_activeBroadcastCount < 10)   return 16;
-  return 20;
+  const recipients = getBroadcastRecipientCount();
+  if (recipients <= 0) return 0;
+
+  let slots;
+  if (recipients <= 4) slots = recipients;
+  else if (recipients <= 8) slots = recipients;
+  else if (recipients <= 16) slots = ENGINE.isMobile ? 6 : 10;
+  else slots = ENGINE.isMobile ? 8 : 14;
+
+  const avgDrainMs = _broadcastDrainMs.length
+    ? _broadcastDrainMs.reduce((a, b) => a + b, 0) / _broadcastDrainMs.length
+    : 0;
+
+  // Slow drains or repeated stalls: cut concurrency to keep flows moving.
+  if (avgDrainMs > 2000) slots -= 2;
+  if (_broadcastConsecutiveStalls >= 2) slots = Math.ceil(slots / 2);
+
+  // Very healthy drains and backlog: cautiously open a little more.
+  if (avgDrainMs > 0 && avgDrainMs < 650 && recipients > slots) slots += 1;
+
+  return clamp(slots, 1, Math.min(BROADCAST_HARD_MAX, recipients));
 }
 
 let   _activeBroadcastCount = 0;
 const _broadcastSendQueue   = [];
 let   _bcQueueRunning       = false; // guard against re-entrant draining
+let   _broadcastRecipientCount = 0;
+let   _broadcastConsecutiveStalls = 0;
+const _broadcastDrainMs = [];
+let   _broadcastWatchdogTimer = null;
+let   _lastBroadcastProgressAt = 0;
 
 function isBroadcastTransfer(id) { return id?.startsWith("bc-"); }
+
+function markBroadcastProgress() {
+  _lastBroadcastProgressAt = Date.now();
+}
+
+function pushBroadcastDrainMs(ms) {
+  _broadcastDrainMs.push(ms);
+  if (_broadcastDrainMs.length > 24) _broadcastDrainMs.shift();
+}
+
+function resetBroadcastController(expectedRecipients = 0) {
+  _broadcastRecipientCount = expectedRecipients;
+  _broadcastConsecutiveStalls = 0;
+  _broadcastDrainMs.length = 0;
+  markBroadcastProgress();
+}
+
+function clearBroadcastWatchdog() {
+  if (_broadcastWatchdogTimer) {
+    clearInterval(_broadcastWatchdogTimer);
+    _broadcastWatchdogTimer = null;
+  }
+}
+
+function ensureBroadcastWatchdog() {
+  if (_broadcastWatchdogTimer) return;
+  _broadcastWatchdogTimer = setInterval(() => {
+    if (_broadcastSendQueue.length === 0) return;
+    const maxSlots = getMaxBroadcastSlots();
+    const noActiveForTooLong = _activeBroadcastCount === 0 && (Date.now() - _lastBroadcastProgressAt > BROADCAST_STUCK_MS);
+    const belowTargetSlots = _activeBroadcastCount < maxSlots;
+
+    // If drain loop got stuck or slots are available, kick it again.
+    if (noActiveForTooLong || belowTargetSlots) {
+      processBroadcastQueue();
+    }
+  }, BROADCAST_WATCHDOG_MS);
+}
+
+function enqueueBroadcastJob(job) {
+  const exists = _broadcastSendQueue.some(q => q.transferId === job.transferId && q.from === job.from);
+  if (exists) return false;
+  _broadcastSendQueue.push(job);
+  markBroadcastProgress();
+  return true;
+}
 
 function processBroadcastQueue() {
   if (_bcQueueRunning) return;
@@ -98,6 +177,7 @@ function processBroadcastQueue() {
     }
     const { from, transferId, peerName } = _broadcastSendQueue.shift();
     _activeBroadcastCount++;
+    markBroadcastProgress();
     useStore.getState().updateOutgoing(transferId, { status: "connecting" });
     _activeTransferPeer[from] = transferId;
     // createOffer is async but we don't await — each peer is independent.
@@ -447,6 +527,8 @@ function sendOverChannel(transferId, file, toPeerId, toPeerName) {
     () => {
       console.error(`🚨 Sender stalled on ${transferId}`);
       if (isBroadcastTransfer(transferId)) {
+        _broadcastConsecutiveStalls++;
+        markBroadcastProgress();
         console.warn(`♻️ Re-queuing stalled broadcast peer (${transferId})`);
         // cleanup() wipes _pendFiles[transferId] and _sending[transferId].
         // Call it first, then restore from the persistent registry.
@@ -460,7 +542,7 @@ function sendOverChannel(transferId, file, toPeerId, toPeerName) {
           console.error(`♻️ Cannot retry ${transferId} — file no longer in registry`);
           return;
         }
-        _broadcastSendQueue.push({ from: toPeerId, transferId, peerName: toPeerName });
+        enqueueBroadcastJob({ from: toPeerId, transferId, peerName: toPeerName });
         processBroadcastQueue();
       } else {
         useStore.getState().updateOutgoing(transferId, { status: "stalled" });
@@ -500,6 +582,10 @@ function sendOverChannel(transferId, file, toPeerId, toPeerName) {
             if (drainHistory.length > 10) drainHistory.shift();
             const avg = drainHistory.reduce((a, b) => a + b, 0) / drainHistory.length;
             bpTimeout = Math.max(BP_MIN_MS, Math.min(avg * 3, BP_MAX_MS));
+            if (isBroadcastTransfer(transferId)) {
+              pushBroadcastDrainMs(drainMs);
+              markBroadcastProgress();
+            }
           } else {
             if (dc.readyState !== "open") { delete _sending[transferId]; return; }
             console.warn(
@@ -587,6 +673,8 @@ function sendOverChannel(transferId, file, toPeerId, toPeerName) {
 
       if (isBroadcastTransfer(transferId)) {
         _activeBroadcastCount = Math.max(0, _activeBroadcastCount - 1);
+        _broadcastConsecutiveStalls = Math.max(0, _broadcastConsecutiveStalls - 1);
+        markBroadcastProgress();
         processBroadcastQueue();
       }
 
@@ -650,6 +738,7 @@ export function useSwiftDrop() {
     _socket = sock;
     window._swiftSock = sock;
     initialized.current = true;
+    ensureBroadcastWatchdog();
 
     sock.on("connect", () => {
       console.log("✅ Socket connected:", sock.id);
@@ -692,6 +781,8 @@ export function useSwiftDrop() {
 
     // Broadcast acknowledgement from server
     sock.on("broadcast-sent", ({ count, transferId }) => {
+      _broadcastRecipientCount = Math.max(_broadcastRecipientCount, count || 0);
+      markBroadcastProgress();
       console.log(`📢 Broadcast sent to ${count} peers (${transferId})`);
     });
 
@@ -708,6 +799,7 @@ export function useSwiftDrop() {
       Object.keys(_broadcastFiles).forEach(k => delete _broadcastFiles[k]);
       _broadcastSendQueue.length = 0;
       _activeBroadcastCount = 0;
+      clearBroadcastWatchdog();
       if (wasHost) {
         clearGuestSessionEnded();
         useStore.getState().reset();
@@ -791,7 +883,7 @@ export function useSwiftDrop() {
           });
         }
         // Enqueue — processBroadcastQueue manages the slot and increments counter
-        _broadcastSendQueue.push({ from, transferId, peerName });
+        enqueueBroadcastJob({ from, transferId, peerName });
         processBroadcastQueue();
         return; // do NOT fall through to direct createOffer below
       }
@@ -864,6 +956,13 @@ export function useSwiftDrop() {
 
   const broadcastFile = useCallback((file) => {
     const transferId = `bc-${Date.now()}`;
+    const recipients = (useStore.getState().peers || []).filter(p => !p.isHost).length;
+    if (_activeBroadcastCount === 0 && _broadcastSendQueue.length === 0) {
+      resetBroadcastController(recipients);
+    } else {
+      _broadcastRecipientCount = Math.max(_broadcastRecipientCount, recipients);
+      markBroadcastProgress();
+    }
     // Store in both: _pendFiles for the immediate send path, and _broadcastFiles
     // as a persistent registry so late joiners can always resolve the file.
     _pendFiles[`__broadcast__${transferId}`] = file;
@@ -915,6 +1014,7 @@ export function useSwiftDrop() {
     Object.keys(_broadcastFiles).forEach(k => delete _broadcastFiles[k]);
     _broadcastSendQueue.length = 0;
     _activeBroadcastCount = 0;
+    clearBroadcastWatchdog();
   }, []);
   const updateSettings = useCallback((patch)  => _socket?.emit("update-room-settings", patch), []);
   const approveHostCreate = useCallback((requestId) => _socket?.emit("approve-host-create", { requestId }), []);
