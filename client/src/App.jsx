@@ -54,9 +54,8 @@ export default function App() {
         setServerInfo(info);
         setServerConfig(info); // wire TURN config into WebRTC engine
 
-        const serverUrl = (import.meta.env.DEV)
-          ? `http://${window.location.hostname}:3001`
-          : window.location.origin;
+        // Use current origin; in dev, Vite proxy forwards to backend.
+        const serverUrl = window.location.origin;
 
         initSocket(serverUrl);
         setLoading(false);
